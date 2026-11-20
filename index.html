@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pantry</title>
+  <meta name="theme-color" content="#2f4a3a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Pantry">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1 id="title">Pantry</h1>
+      <span id="sync-dot" class="sync-dot" title="Local only"></span>
+      <a href="#/settings" class="icon-btn" aria-label="Settings">⚙︎</a>
+    </header>
+    <div id="refresh-banner" class="refresh-banner" hidden>
+      <span>🛒 The list was updated on another phone.</span>
+      <button class="btn small">Refresh</button>
+    </div>
+    <main id="view"></main>
+    <nav class="tabbar">
+      <a href="#/stock" data-tab="stock"><span class="ti">🥫</span><span>Stock</span></a>
+      <a href="#/scan" data-tab="scan"><span class="ti">📷</span><span>Scan list</span></a>
+      <a href="#/grocery" data-tab="grocery"><span class="ti">🛒</span><span>Grocery</span><b id="grocery-badge" class="badge" hidden></b></a>
+      <a href="#/recipes" data-tab="recipes"><span class="ti">📖</span><span>Recipes</span></a>
+    </nav>
+  </div>
+  <div id="sheet-root"></div>
+  <div id="toast-root"></div>
+  <div id="print-root" aria-hidden="true"></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
