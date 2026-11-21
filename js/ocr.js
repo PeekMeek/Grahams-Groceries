@@ -76,7 +76,11 @@ export function parseLine(raw) {
   if (unit === 'dozen') { qty = (amount || 1) * 12 * (count || 1); unit = ''; }
   else if (amount != null && !isNaN(amount)) qty = amount * (count || 1);
   else qty = count || 1;
-  const name = clean(s).replace(/^(?:a\s+)?(?:bags?|box(?:es)?|cans?|jars?|packs?|packages?|bottles?|cartons?|tubs?)\s+of\s+/i, '');
+  // drop container words so "1 lb bag broccoli florets" / "peeled garlic bag" match "broccoli florets" / "peeled garlic"
+  const CONT = '(?:bags?|box(?:es)?|cans?|jars?|packs?|packets?|packages?|bottles?|cartons?|tubs?)';
+  let name = clean(s).replace(new RegExp(`^(?:a\\s+)?${CONT}\\s+(?:of\\s+)?(?=\\S)`, 'i'), '');
+  const noTail = name.replace(new RegExp(`\\s+${CONT}$`, 'i'), '');
+  if (/[a-z]{3}/i.test(noTail)) name = noTail;
   if (!name || !/[a-z]{2}/i.test(name)) return null;
   return { raw: String(raw).trim(), name, qty: Math.round(qty * 1000) / 1000, unit, count: count || (unit && !WEIGHTS[unit] ? qty : 1) };
 }
@@ -108,25 +112,53 @@ function loadScript(src) {
   });
 }
 
-async function ocrText(dataUrl, onProgress) {
+async function ocrData(dataUrl, onProgress) {
   if (!window.Tesseract) await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
   const { data } = await window.Tesseract.recognize(dataUrl, 'eng', {
     logger: m => m.status === 'recognizing text' && onProgress?.(Math.round(m.progress * 100))
   });
-  return data.text;
+  return data;
+}
+const ocrText = async (dataUrl, onProgress) => (await ocrData(dataUrl, onProgress)).text;
+
+// Text that is clearly not words: "TR me ma EREBEEC", "i SE MER | = | - HE"
+export function looksLikeJunk(name) {
+  const compact = name.replace(/\s/g, '');
+  const letters = (compact.match(/[a-z]/gi) || []).length;
+  if (!compact || letters / compact.length < 0.8) return true;           // lots of | = » ) etc.
+  if (/[|»«<>=~^_\\{}\[\]]/.test(name)) return true;                       // OCR noise symbols
+  const words = name.split(/\s+/).filter(w => /^[a-z][a-z'-]*$/i.test(w));
+  const real = words.filter(w => w.length >= 3 && /[aeiouy]/i.test(w) && !/^[A-Z]{3,}$/.test(w));
+  return !real.length || words.filter(w => w.length <= 2).length > real.length;
 }
 
+// The free reader. It is built for printed text; for handwriting it mostly
+// produces nonsense, so unreadable lines are dropped and the result is flagged.
 export async function readWithTesseract(dataUrl, onProgress) {
-  return parseText(await ocrText(dataUrl, onProgress));
+  const data = await ocrData(dataUrl, onProgress);
+  const lines = data.lines?.length ? data.lines : data.text.split('\n').map(text => ({ text, confidence: data.confidence }));
+  const rows = [];
+  let seen = 0, dropped = 0, conf = 0;
+  for (const l of lines) {
+    const p = parseLine(l.text || '');
+    if (!p) continue;
+    seen++; conf += l.confidence ?? 0;
+    if ((l.confidence ?? 100) < 60 || looksLikeJunk(p.name)) { dropped++; continue; }
+    rows.push(p);
+  }
+  return { rows, dropped, unreadable: !seen || conf / seen < 65 || dropped > rows.length };
 }
 
 export async function readWithClaude(dataUrl, { apiKey, model, knownNames = [] }) {
   const [meta, b64] = dataUrl.split(',');
   const media = meta.match(/data:(.*?);/)[1];
   const prompt = `This is a photo of a household food list (often handwritten).
+The list usually has no bullets or numbers: every new line on the paper is a new item. Return exactly one entry per written line, top to bottom, in order. Never merge two lines into one item and never split one line into several, even when a line has several words or the handwriting runs close to the next line. Skip blank lines and a title/heading line (e.g. "Groceries", a date).
+The list is often written in two columns: a quantity column on the left (e.g. "3x", "10x", "1x") and the item on the right, which may include its own size (e.g. "1 lb bag broccoli florets", "1/2 gallon vanilla ice cream", "12 oz steamable corn bag"). Treat each row as one item and combine both parts.
+If a number or word has been crossed out, scribbled over or written over, ignore it and use the final, uncrossed one (e.g. "10 9x" where the 9 is struck through means 10x).
 Read every line item. For each, return:
-- "name": the item only, without quantities (e.g. "ground beef").
-- "quantity": every quantity written on that line, copied exactly as written, including multipliers, fractions and units. Examples: "1x", "x2", "3", "1/4 lb", "1 1/2 lb", "12 oz", "2x 1 lb", "2#", "3 cans", "1 dozen", "½ gal". Use "" if no quantity is written.
+- "name": the item only, without quantities, sizes or container words, keeping descriptive words (e.g. "broccoli florets", "peeled garlic", "steamable corn", "vanilla ice cream", "udon noodles").
+- "quantity": every quantity written on that line, copied exactly as written, including multipliers, fractions and units. Combine the quantity column and any size in the item text, multiplier first. Examples: "1x", "x2", "3", "1/4 lb", "1 1/2 lb", "12 oz", "2x 1 lb", "10x 12 oz", "1x 1/2 gal", "1x 1/2 loaf", "1x 1/4", "2#", "3 cans", "1 dozen". Use "" if no quantity is written.
 - "raw": the whole line as written.
 If an item clearly refers to one of these existing household items, use the existing name exactly: ${JSON.stringify(knownNames.slice(0, 300))}
 Ignore titles, dates, crossed-out lines and doodles. Read handwritten fractions carefully (1/4 vs 1/2 vs 4).
@@ -141,7 +173,7 @@ Respond with ONLY a JSON array like [{"name":"ground beef","quantity":"2x 1 lb",
     },
     body: JSON.stringify({
       model: model || 'claude-sonnet-5-5',
-      max_tokens: 2000,
+      max_tokens: 4000,
       messages: [{ role: 'user', content: [
         { type: 'image', source: { type: 'base64', media_type: media, data: b64 } },
         { type: 'text', text: prompt }
