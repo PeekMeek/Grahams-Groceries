@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { DEFAULT_CATEGORIES } from './categories.js';
 import { $, $$, esc, uid, fmtWhen, fmtQty, normalize, bestMatch, compressImage, toast, openSheet, confirmSheet } from './util.js';
-import { readWithClaude, readWithTesseract, parseText } from './ocr.js';
+import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract } from './ocr.js';
 import * as gh from './github.js';
 
 const LOW = 2; // starred items at or below this quantity go on the grocery list as suggestions
@@ -18,12 +18,18 @@ const ui = {
   gMode: 'all', gCat: null, gSub: null, showDone: false,
   gDraft: { name: '', qty: 1, photo: null, category: '', sub: '', note: '' },
   recipeSearch: '', canMakeOnly: false,
+  recipeScale: {}, scaleCustom: {}, scaleText: {},
   scan: { stage: 'pick' },
   recipeDraft: null
 };
 
 // ---------------- categories ----------------
-const cats = () => db.get('meta', 'categories')?.list || DEFAULT_CATEGORIES;
+const cats = () => {
+  const saved = db.get('meta', 'categories')?.list;
+  if (!saved) return DEFAULT_CATEGORIES;
+  // households that saved categories before "Household goods" existed get the new version
+  return saved.map(c => c.id === 'household' && c.name === 'Household' && !c.nonFood ? DEFAULT_CATEGORIES.find(d => d.id === 'household') : c);
+};
 const OTHER = { id: 'other', name: 'Other', icon: '📦', subs: [] };
 const cat = id => cats().find(c => c.id === id) || cats().find(c => c.id === 'other') || OTHER;
 
@@ -46,7 +52,7 @@ const GUESS = [
   ['veggies', 'Squash', 'zucchini squash pumpkin cucumber'],
   ['veggies', 'Mushrooms', 'mushroom'],
   ['veggies', 'Herbs', 'basil cilantro parsley mint thyme rosemary dill'],
-  ['veggies', '', 'broccoli cauliflower celery corn pea bean asparagus avocado'],
+  ['veggies', '', 'broccoli cauliflower celery corn pea asparagus avocado'],
   ['fruit', 'Berries', 'strawberry blueberry raspberry blackberry berry grape'],
   ['fruit', 'Citrus', 'lemon lime orange grapefruit clementine'],
   ['fruit', 'Apples & pears', 'apple pear'],
@@ -61,7 +67,7 @@ const GUESS = [
   ['pantry', 'Spices', 'salt cumin paprika cinnamon oregano spice seasoning'],
   ['pantry', 'Sauces & condiments', 'ketchup mustard mayo mayonnaise sauce salsa dressing soy honey jam peanut'],
   ['pantry', 'Canned goods', 'can canned soup broth stock'],
-  ['pantry', 'Beans & lentils', 'lentil chickpea black beans kidney'],
+  ['pantry', 'Beans & lentils', 'lentil chickpea bean beans kidney'],
   ['pantry', 'Breakfast', 'cereal granola pancake syrup'],
   ['frozen', 'Ice cream', 'ice cream gelato'],
   ['frozen', 'Meals', 'frozen pizza'],
@@ -75,23 +81,74 @@ const GUESS = [
   ['drinks', 'Soda & water', 'soda water seltzer cola sparkling'],
   ['drinks', 'Beer & wine', 'beer wine'],
   ['prepared', 'Leftovers', 'leftover leftovers'],
-  ['household', 'Paper goods', 'paper towel toilet napkin foil wrap'],
-  ['household', 'Cleaning', 'soap detergent bleach sponge dish']
+  ['household', 'Paper goods', 'paper towel, toilet paper, tissue, napkin, paper plate, paper cup, kleenex, bounty, charmin'],
+  ['household', 'Laundry', 'laundry, detergent, laundry detergent, fabric softener, dryer sheet, bleach, stain remover, tide pod, tide'],
+  ['household', 'Dish & kitchen', 'dish soap, dishwasher pod, dishwasher detergent, dish detergent, aluminum foil, foil, plastic wrap, cling wrap, parchment, parchment paper, wax paper, ziploc, sandwich bag, freezer bag, storage bag'],
+  ['household', 'Cleaning', 'cleaner, all purpose cleaner, glass cleaner, disinfectant, wipe, disinfecting wipe, lysol, clorox, windex, sponge, scrub brush, mop, swiffer'],
+  ['household', 'Trash bags', 'trash bag, garbage bag, bin liner, hefty'],
+  ['household', 'Batteries & bulbs', 'battery, aa, aaa, aa battery, aaa battery, light bulb, bulb'],
+  ['household', 'Toiletries', 'shampoo, conditioner, toothpaste, toothbrush, deodorant, body wash, soap, hand soap, razor, floss, lotion, mouthwash, sunscreen'],
+  ['household', 'Medicine & first aid', 'bandage, band aid, bandaid, ibuprofen, tylenol, advil, acetaminophen, vitamin, allergy medicine, cough drop'],
+  ['household', 'Pet supplies', 'dog food, cat food, cat litter, litter, pet food']
 ];
+// split a keyword list: comma lists may contain multi-word phrases, others are space separated
+const words = list => (list.includes(',') ? list.split(',') : list.split(' ')).map(w => normalize(w.trim())).filter(Boolean);
 function guessCategory(name) {
-  const words = normalize(name).split(' ');
-  for (let i = words.length - 1; i >= 0; i--) {           // last word is usually the noun
+  const n = normalize(name);
+  const hit = (c, sub) => ({ category: c, sub: cat(c).subs.includes(sub) ? sub : '' });
+  // 1) multi-word phrases first ("dish soap", "toilet paper", "plastic wrap"), longest first
+  let best = null;
+  for (const [c, sub, list] of GUESS) {
+    if (!cats().some(x => x.id === c)) continue;
+    for (const ph of words(list)) if (ph.includes(' ') && ` ${n} `.includes(` ${ph} `) && (!best || ph.length > best.len)) best = { c, sub, len: ph.length };
+  }
+  if (best) return hit(best.c, best.sub);
+  // 2) single words, last word first (it's usually the noun)
+  const ws = n.split(' ');
+  for (let i = ws.length - 1; i >= 0; i--) {
     for (const [c, sub, list] of GUESS) {
-      if (list.split(' ').map(normalize).includes(words[i]) && cats().some(x => x.id === c))
-        return { category: c, sub: cat(c).subs.includes(sub) ? sub : '' };
+      if (words(list).includes(ws[i]) && cats().some(x => x.id === c)) return hit(c, sub);
     }
   }
   return { category: 'other', sub: '' };
 }
 
+// ---------------- prices & links ----------------
+const money = n => '$' + (Math.round(n * 100) / 100).toFixed(2);
+const parsePrice = v => { const n = parseFloat(String(v ?? '').replace(/[^0-9.]/g, '')); return n >= 0 && isFinite(n) ? Math.round(n * 100) / 100 : null; };
+function cleanLink(v) {
+  v = String(v || '').trim();
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  try { return new URL(v).href; } catch { return ''; }
+}
+const linkHost = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'link'; } };
+// the stock item a grocery entry refers to (by link or by name)
+const itemForGrocery = g => (g.itemId && db.get('items', g.itemId)) || findItem(g.name);
+function groceryPrice(g) {
+  const it = itemForGrocery(g);
+  const each = it?.price ?? g.price;
+  return each == null ? null : each * (g.qty || 1);
+}
+const groceryLink = g => itemForGrocery(g)?.link || g.link || '';
+
+// Price + link fields shared by the item and grocery sheets.
+function priceLinkFields(price, link, priceAt) {
+  return `
+      <label>Price paid (each)
+        <span class="money-in"><span>$</span><input data-f="price" type="text" inputmode="decimal" value="${price != null ? price.toFixed(2) : ''}" placeholder="0.00" autocomplete="off"></span>
+        ${priceAt ? `<span class="field-note">Last updated ${fmtWhen(priceAt)}</span>` : ''}
+      </label>
+      <label>Link to buy it
+        <span class="link-in"><input data-f="link" type="url" inputmode="url" value="${esc(link || '')}" placeholder="https://…" autocomplete="off">
+        ${link ? `<a class="btn small" href="${esc(link)}" target="_blank" rel="noopener">Open ↗</a>` : ''}</span>
+      </label>`;
+}
+
 // ---------------- domain helpers ----------------
 const items = () => db.list('items').sort((a, b) => a.name.localeCompare(b.name));
-const isPrepared = it => it.prepared ?? !!cat(it.category).prepared;
+const isNonFood = it => !!cat(it.category).nonFood;
+const isPrepared = it => isNonFood(it) || (it.prepared ?? !!cat(it.category).prepared);
 const isLow = it => it.starred && it.qty <= LOW;
 const activeGrocery = () => db.list('grocery').filter(g => !g.done);
 const groceryFor = it => activeGrocery().find(g => g.itemId === it.id || normalize(g.name) === normalize(it.name));
@@ -99,10 +156,55 @@ const suggestions = () => items().filter(it => isLow(it) && !it.lowDismissed && 
 const findItem = name => bestMatch(name, db.list('items'), 0.75);
 const resolveIng = ing => (ing.itemId && db.get('items', ing.itemId)) || findItem(ing.name);
 
-function recipeStatus(r) {
+// ---------------- batch scaling ----------------
+const SCALES = [0.5, 1, 1.5, 2];
+const UNI = { '½': .5, '¼': .25, '¾': .75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': .125, '⅜': .375, '⅝': .625, '⅞': .875 };
+const QTY_RE = /(\d+\s+\d+\/\d+|\d+\/\d+|\d*[½¼¾⅓⅔⅛⅜⅝⅞]|\d+(?:\.\d+)?)(\s*[-–]\s*(\d+\s+\d+\/\d+|\d+\/\d+|\d*[½¼¾⅓⅔⅛⅜⅝⅞]|\d+(?:\.\d+)?))?/g;
+
+function parseQty(t) {
+  t = t.trim();
+  let m;
+  if ((m = t.match(/^(\d+)\s+(\d+)\/(\d+)$/))) return +m[1] + m[2] / m[3];
+  if ((m = t.match(/^(\d+)\/(\d+)$/))) return m[2] ? m[1] / m[2] : NaN;
+  if ((m = t.match(/^(\d*)([½¼¾⅓⅔⅛⅜⅝⅞])$/))) return (+m[1] || 0) + UNI[m[2]];
+  return parseFloat(t);
+}
+
+// 1.5 -> "1 1/2", 0.333 -> "1/3", 2.2 -> "2.2"
+function niceQty(x) {
+  const whole = Math.floor(x + 1e-6), frac = x - whole;
+  const F = [[0, ''], [1 / 8, '1/8'], [1 / 6, '1/6'], [1 / 4, '1/4'], [1 / 3, '1/3'], [3 / 8, '3/8'], [1 / 2, '1/2'], [5 / 8, '5/8'], [2 / 3, '2/3'], [3 / 4, '3/4'], [5 / 6, '5/6'], [7 / 8, '7/8'], [1, '']];
+  const [v, f] = F.reduce((a, b) => Math.abs(b[0] - frac) < Math.abs(a[0] - frac) ? b : a);
+  if (Math.abs(v - frac) > 0.02) return String(Math.round(x * 100) / 100);
+  const w = whole + (v === 1 ? 1 : 0);
+  return f ? (w ? `${w} ${f}` : f) : String(w);
+}
+
+// Scale the first quantity in an amount ("1 1/2 cups", "2-3 cloves", "2 (15 oz) cans").
+// Numbers inside brackets (package sizes) are left alone.
+function scaleAmount(text, k) {
+  if (!text || k === 1) return text || '';
+  QTY_RE.lastIndex = 0;
+  let m;
+  while ((m = QTY_RE.exec(text))) {
+    const before = text.slice(0, m.index);
+    if ((before.match(/\(/g) || []).length > (before.match(/\)/g) || []).length) continue;
+    const a = parseQty(m[1]);
+    if (isNaN(a)) continue;
+    let out = niceQty(a * k);
+    if (m[3]) { const b = parseQty(m[3]); if (!isNaN(b)) out += '–' + niceQty(b * k); }
+    return text.slice(0, m.index) + out + text.slice(m.index + m[0].length);
+  }
+  return text;
+}
+
+const scaleOf = id => ui.recipeScale[id] || 1;
+const scaleLabel = k => `${+k.toFixed(2)}× batch`;
+
+function recipeStatus(r, scale = 1) {
   const rows = (r.ingredients || []).map(ing => {
     const item = resolveIng(ing);
-    const need = +ing.uses || 1;
+    const need = Math.round((+ing.uses || 1) * scale * 100) / 100;
     const ok = ing.optional || (item && item.qty >= need);
     return { ing, item, need, ok };
   });
@@ -153,18 +255,18 @@ const invDatalist = () => `<datalist id="inv-names">${items().map(i => `<option 
 function chipsRow(list, current, act, allLabel) {
   return `<div class="chips">
     <button class="chip ${!current ? 'on' : ''}" data-act="${act}" data-v="">${esc(allLabel)}</button>
-    ${list.map(x => `<button class="chip ${current === x.v ? 'on' : ''}" data-act="${act}" data-v="${esc(x.v)}">${esc(x.label)}${x.n != null ? ` <small>${x.n}</small>` : ''}</button>`).join('')}
+    ${list.map(x => `<button class="chip ${current === x.v ? 'on' : ''} ${x.n === 0 ? 'dim' : ''}" data-act="${act}" data-v="${esc(x.v)}">${esc(x.label)}${x.n != null ? ` <small>${x.n}</small>` : ''}</button>`).join('')}
   </div>`;
 }
 
 // Category → subcategory filter UI shared by Stock and Grocery.
-function catFilter(list, mode, cId, subId, prefix) {
+function catFilter(list, mode, cId, subId, prefix, showAll = false) {
   if (mode !== 'cat') return '';
-  const used = cats().filter(c => list.some(x => x.category === c.id));
+  const used = showAll ? cats() : cats().filter(c => list.some(x => x.category === c.id));
   let html = chipsRow(used.map(c => ({ v: c.id, label: `${c.icon} ${c.name}`, n: list.filter(x => x.category === c.id).length })), cId, `${prefix}Cat`, 'All categories');
   if (cId) {
     const inCat = list.filter(x => x.category === cId);
-    const subs = cat(cId).subs.filter(s => inCat.some(x => x.sub === s));
+    const subs = cat(cId).subs.filter(s => showAll || inCat.some(x => x.sub === s));
     if (inCat.some(x => !x.sub || !cat(cId).subs.includes(x.sub))) subs.push('Unsorted');
     if (subs.length > 1 || (subs.length === 1 && subs[0] !== 'Unsorted'))
       html += chipsRow(subs.map(s => ({ v: s, label: s, n: inCat.filter(x => s === 'Unsorted' ? (!x.sub || !cat(cId).subs.includes(x.sub)) : x.sub === s).length })), subId, `${prefix}Sub`, `All ${cat(cId).name.toLowerCase()}`);
@@ -202,7 +304,7 @@ function itemRow(it) {
     ${thumb(it.photo)}
     <div class="grow">
       <div class="name">${esc(it.name)}</div>
-      <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
+      <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
     </div>
     <div class="stepper">
       <button data-act="dec" data-id="${it.id}" aria-label="Use one">−</button>
@@ -217,11 +319,14 @@ function viewStock() {
   if (ui.starredOnly) list = list.filter(i => i.starred);
   const q = normalize(ui.stockSearch);
   if (q) list = list.filter(i => normalize(i.name).includes(q));
-  const filterBar = catFilter(list, ui.stockMode, ui.stockCat, ui.stockSub, 'stock');
+  const filterBar = catFilter(list, ui.stockMode, ui.stockCat, ui.stockSub, 'stock', true);
   const shown = ui.stockMode === 'cat' ? applyCatFilter(list, ui.stockCat, ui.stockSub) : list;
-  const body = !db.list('items').length
-    ? `<div class="empty"><p>No food in stock yet.</p><p>Add items one by one, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p></div>`
-    : !shown.length ? `<div class="empty"><p>Nothing matches.</p></div>`
+  const inCatView = ui.stockMode === 'cat' && ui.stockCat;
+  const body = !db.list('items').length && !inCatView
+    ? `<div class="empty"><p>Nothing in stock yet.</p><p>Add items one by one, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p></div>`
+    : !shown.length ? (inCatView && !q
+      ? `<div class="empty"><p>No ${esc((ui.stockSub && ui.stockSub !== 'Unsorted' ? ui.stockSub : cat(ui.stockCat).name).toLowerCase())} in stock yet.</p><button class="btn" data-act="newItem">＋ Add ${esc(cat(ui.stockCat).name.toLowerCase())}</button></div>`
+      : `<div class="empty"><p>Nothing matches.</p></div>`)
     : ui.stockMode === 'cat' && !ui.stockCat ? grouped(shown, itemRow) : shown.map(itemRow).join('');
   return `
     <div class="toolbar">
@@ -239,9 +344,10 @@ function viewStock() {
     <button class="fab" data-act="newItem">＋ Add item</button>`;
 }
 
-function itemSheet(it) {
+function itemSheet(it, prefill = null) {
   const isNew = !it;
   it = it || { id: uid(), name: '', qty: 1, unit: '', starred: false, category: ui.stockCat || 'other', sub: ui.stockSub && ui.stockSub !== 'Unsorted' ? ui.stockSub : '', photo: null, notes: '' };
+  if (isNew && prefill?.name) it = { ...it, qty: 0, ...guessCategory(prefill.name), ...prefill };
   let photo = it.photo;
   const recipes = !isNew && !isPrepared(it) ? recipesUsing(it) : [];
   const recipesHtml = isNew || isPrepared(it) ? '' : `
@@ -272,8 +378,9 @@ function itemSheet(it) {
         <label>Quantity<input data-f="qty" type="number" step="any" min="0" value="${fmtQty(it.qty)}"></label>
         <label>Unit (optional)<input data-f="unit" value="${esc(it.unit || '')}" placeholder="pack, lb, can…"></label>
       </div>
+      ${priceLinkFields(it.price, it.link, it.priceAt)}
       <label class="check-line"><input type="checkbox" data-f="starred" ${it.starred ? 'checked' : ''}> ★ Starred — suggest for the grocery list when ${LOW} or fewer are left</label>
-      <label class="check-line"><input type="checkbox" data-f="prepared" ${isPrepared(it) ? 'checked' : ''}> Prepared / ready-to-eat (no recipe suggestions)</label>
+      <label class="check-line prep-line" ${isNonFood(it) ? 'hidden' : ''}><input type="checkbox" data-f="prepared" ${!isNonFood(it) && isPrepared(it) ? 'checked' : ''}> Prepared / ready-to-eat (no recipe suggestions)</label>
       <label>Notes<input data-f="notes" value="${esc(it.notes || '')}" placeholder="Where it's kept, brand…"></label>
     </div>
     <div class="row-end">
@@ -283,7 +390,8 @@ function itemSheet(it) {
     ${recipesHtml}`, {
     onMount(s, close) {
       const f = k => s.querySelector(`[data-f="${k}"]`);
-      f('category').onchange = () => { f('sub').innerHTML = subOptions(f('category').value, ''); };
+      const syncPrep = () => { s.querySelector('.prep-line').hidden = !!cat(f('category').value).nonFood; };
+      f('category').onchange = () => { f('sub').innerHTML = subOptions(f('category').value, ''); syncPrep(); };
       f('photo').onchange = async e => {
         if (!e.target.files[0]) return;
         photo = await compressImage(e.target.files[0], 600);
@@ -297,6 +405,7 @@ function itemSheet(it) {
           f('category').value = g.category;
           f('sub').innerHTML = subOptions(g.category, g.sub);
           f('prepared').checked = !!cat(g.category).prepared;
+          syncPrep();
         });
       }
       s.querySelector('[data-save]').onclick = async () => {
@@ -304,10 +413,13 @@ function itemSheet(it) {
         if (!name) return f('name').focus();
         const category = f('category').value;
         const prepared = f('prepared').checked;
+        const price = parsePrice(f('price').value);
         await setQty({
           ...it, name, category, sub: f('sub').value, unit: f('unit').value.trim(), notes: f('notes').value.trim(),
+          price, priceAt: price === (it.price ?? null) ? it.priceAt : (price == null ? null : Date.now()),
+          link: cleanLink(f('link').value),
           starred: f('starred').checked, photo,
-          prepared: prepared === !!cat(category).prepared ? undefined : prepared
+          prepared: cat(category).nonFood || prepared === !!cat(category).prepared ? undefined : prepared
         }, parseFloat(f('qty').value) || 0);
         close();
         toast(isNew ? `Added ${name}` : `Saved ${name}`);
@@ -449,13 +561,15 @@ async function applyScan() {
 // ---------------- Grocery ----------------
 function groceryRow(g) {
   const c = cat(g.category);
+  const price = groceryPrice(g), link = groceryLink(g);
   return `<div class="row g ${g.done ? 'done' : ''}">
     <label class="check"><input type="checkbox" data-change="toggleDone" data-id="${g.id}" ${g.done ? 'checked' : ''}><span></span></label>
     ${g.photo ? thumb(g.photo, 'thumb', 'viewPhoto') : ''}
     <div class="grow" data-act="editGrocery" data-id="${g.id}">
-      <div class="name">${esc(g.name)}${g.qty > 1 ? ` <span class="x">×${fmtQty(g.qty)}</span>` : ''}</div>
+      <div class="name">${esc(g.name)}${g.qty > 1 ? ` <span class="x">×${fmtQty(g.qty)}</span>` : ''}${price != null ? ` <span class="price">~${money(price)}</span>` : ''}</div>
       <div class="meta">${c.icon} ${esc(g.sub || c.name)} · ${g.done ? `got by ${esc(g.doneBy || '?')} ${fmtWhen(g.doneAt)}` : `${esc(g.addedBy || '?')}, ${fmtWhen(g.addedAt)}`}${g.note ? ` · <i>${esc(g.note)}</i>` : ''}</div>
     </div>
+    ${link ? `<a class="buy-link" href="${esc(link)}" target="_blank" rel="noopener" title="Buy at ${esc(linkHost(link))}" aria-label="Open buy link">🔗</a>` : ''}
   </div>`;
 }
 
@@ -514,7 +628,20 @@ function viewGrocery() {
         <button class="linkish" data-act="toggleShowDone">${ui.showDone ? '▾' : '▸'} Picked up (${done.length})</button>
         <button class="btn small ghost" data-act="clearDone">Clear picked up</button>
       </div>
-      ${ui.showDone ? `<div class="list">${done.map(groceryRow).join('')}</div>` : ''}` : ''}`;
+      ${ui.showDone ? `<div class="list">${done.map(groceryRow).join('')}</div>` : ''}` : ''}
+    ${totalBar(active)}`;
+}
+
+function totalBar(active) {
+  const prices = active.map(groceryPrice);
+  const priced = prices.filter(p => p != null);
+  if (!priced.length) return '';
+  const missing = prices.length - priced.length;
+  const total = priced.reduce((a, b) => a + b, 0);
+  return `<div class="total-bar">
+    <span>Estimated total${missing ? `<small>${missing} item${missing > 1 ? 's' : ''} without a price</small>` : ''}</span>
+    <b>${money(total)}</b>
+  </div>`;
 }
 
 async function toggleDone(g, checked) {
@@ -534,7 +661,7 @@ async function toggleDone(g, checked) {
       toast(`Picked up ${g.name}`, [{
         label: 'Add to stock', run: async () => {
           const id = uid();
-          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', starred: false, photo: g.photo || null });
+          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', starred: false, photo: g.photo || null, price: g.price ?? null, priceAt: g.price != null ? Date.now() : null, link: g.link || '' });
           await db.put('grocery', { ...db.get('grocery', g.id), itemId: id });
         }
       }], 7000);
@@ -546,6 +673,7 @@ async function toggleDone(g, checked) {
 
 function grocerySheet(g) {
   let photo = g.photo;
+  const it = itemForGrocery(g);
   openSheet(`
     <h2>Edit list item</h2>
     <div class="form">
@@ -562,7 +690,8 @@ function grocerySheet(g) {
         <label>Quantity<input data-f="qty" type="number" min="1" step="any" value="${fmtQty(g.qty)}"></label>
         <label>Note<input data-f="note" value="${esc(g.note || '')}"></label>
       </div>
-      <p class="small muted">Added by ${esc(g.addedBy || '?')} · ${fmtWhen(g.addedAt)}</p>
+      ${priceLinkFields(it ? it.price : g.price, it ? it.link : g.link, it ? it.priceAt : g.priceAt)}
+      <p class="small muted">${it ? `Price and link are saved on <b>${esc(it.name)}</b> in Stock, so they're remembered next time. ` : ''}Added by ${esc(g.addedBy || '?')} · ${fmtWhen(g.addedAt)}</p>
     </div>
     <div class="row-end"><button class="btn ghost danger" data-del>Remove</button><button class="btn primary" data-save>Save</button></div>`, {
     onMount(s, close) {
@@ -574,7 +703,14 @@ function grocerySheet(g) {
         s.querySelector('.pp-img').innerHTML = `<img class="big-thumb" src="${photo}" alt="">`;
       };
       s.querySelector('[data-save]').onclick = async () => {
-        await db.put('grocery', { ...g, name: f('name').value.trim() || g.name, category: f('category').value, sub: f('sub').value, qty: parseFloat(f('qty').value) || 1, note: f('note').value.trim(), photo });
+        const price = parsePrice(f('price').value), link = cleanLink(f('link').value);
+        const upd = { ...g, name: f('name').value.trim() || g.name, category: f('category').value, sub: f('sub').value, qty: parseFloat(f('qty').value) || 1, note: f('note').value.trim(), photo };
+        if (it) {
+          const cur = db.get('items', it.id);
+          if (price !== (cur.price ?? null) || link !== (cur.link || ''))
+            await db.put('items', { ...cur, price, link, priceAt: price === (cur.price ?? null) ? cur.priceAt : (price == null ? null : Date.now()) });
+        } else Object.assign(upd, { price, link, priceAt: price === (g.price ?? null) ? g.priceAt : Date.now() });
+        await db.put('grocery', upd);
         close();
       };
       s.querySelector('[data-del]').onclick = async () => { await db.remove('grocery', g.id); close(); };
@@ -582,15 +718,15 @@ function grocerySheet(g) {
   });
 }
 
-async function addMissing(r) {
+async function addMissing(r, scale = 1) {
   if (!r) return;
-  const { missing } = recipeStatus(r);
+  const { missing } = recipeStatus(r, scale);
   let n = 0;
   for (const m of missing) {
     const it = m.item;
     if (it ? groceryFor(it) : activeGrocery().some(g => normalize(g.name) === normalize(m.ing.name))) continue;
     const short = it ? Math.max(1, Math.ceil(m.need - it.qty)) : Math.ceil(m.need);
-    await addToGrocery({ name: it ? it.name : m.ing.name, qty: short, itemId: it?.id, note: `for ${r.title}` });
+    await addToGrocery({ name: it ? it.name : m.ing.name, qty: short, itemId: it?.id, note: `for ${r.title}${scale !== 1 ? ` (${scaleLabel(scale)})` : ''}` });
     n++;
   }
   toast(n ? `Added ${n} item${n > 1 ? 's' : ''} to the grocery list` : 'Everything missing is already on the list');
@@ -606,7 +742,10 @@ function viewRecipes() {
   return `
     <div class="toolbar">
       <input id="recipe-search" type="search" placeholder="Search recipes or ingredients…" value="${esc(ui.recipeSearch)}" data-input="recipeSearch">
-      <div class="toolbar-row"><button class="chip ${ui.canMakeOnly ? 'on' : ''}" data-act="canMakeOnly">✓ Can make now</button></div>
+      <div class="toolbar-row">
+        <button class="chip ${ui.canMakeOnly ? 'on' : ''}" data-act="canMakeOnly">✓ Can make now</button>
+        <label class="chip scan-chip">📷 Scan a recipe<input type="file" accept="image/*" multiple hidden data-change="recipeScanNew"></label>
+      </div>
     </div>
     ${!db.list('recipes').length ? `<div class="empty"><p>No recipes yet.</p><p>Add your first one — photo, ingredients, steps and notes.</p></div>` : ''}
     <div class="cards">
@@ -625,14 +764,25 @@ function viewRecipes() {
 function viewRecipe(id) {
   const r = db.get('recipes', id);
   if (!r) return `<div class="empty"><p>Recipe not found.</p><a href="#/recipes">Back to recipes</a></div>`;
-  const st = recipeStatus(r);
+  const k = scaleOf(r.id);
+  const custom = !!ui.scaleCustom[r.id];
+  const st = recipeStatus(r, k);
   const notes = [...(r.notes || [])].sort((a, b) => b.at - a.at);
   return `
     <a class="back" href="#/recipes">‹ Recipes</a>
     <div class="recipe">
       ${r.photo ? pimg(r.photo, 'class="hero" data-act="viewPhoto"') : ''}
       <h2 class="rtitle">${esc(r.title)}</h2>
-      <p class="meta">${[r.servings && `Serves ${esc(r.servings)}`, r.time && `⏱ ${esc(r.time)}`, r.madeCount && `Made ${r.madeCount}×, last ${fmtWhen(r.lastMade)}`].filter(Boolean).join(' · ')}</p>
+      <p class="meta">${[r.servings && `Serves ${esc(scaleAmount(r.servings, k))}`, r.time && `⏱ ${esc(r.time)}`, r.madeCount && `Made ${r.madeCount}×, last ${fmtWhen(r.lastMade)}`].filter(Boolean).join(' · ')}</p>
+      <div class="scale-bar">
+        <span class="scale-lbl">Batch</span>
+        <div class="seg">
+          ${SCALES.map(v => `<button class="${!custom && k === v ? 'on' : ''}" data-act="setScale" data-id="${r.id}" data-v="${v}">${v}×</button>`).join('')}
+          <button class="${custom ? 'on' : ''}" data-act="customScale" data-id="${r.id}">Custom</button>
+        </div>
+        ${custom ? `<label class="custom-scale"><input type="number" inputmode="decimal" min="0.05" step="0.25" value="${esc(ui.scaleText[r.id] ?? k)}" data-input="scaleText" data-id="${r.id}" aria-label="Custom batch size">×</label>` : ''}
+      </div>
+      ${k !== 1 ? `<p class="small muted scale-note">Showing a <b>${scaleLabel(k)}</b>. Amounts, servings and the stock check are adjusted; step text isn't, so check pan sizes and cooking times.</p>` : ''}
       <div class="actions">
         <button class="btn primary" data-act="makeRecipe" data-id="${r.id}">✓ Made it</button>
         ${st.canMake ? '' : `<button class="btn" data-act="addMissing" data-id="${r.id}">🛒 Add missing (${st.missing.length})</button>`}
@@ -642,10 +792,11 @@ function viewRecipe(id) {
       <div class="status-banner ${st.canMake ? 'ok' : 'warn'}">${st.canMake ? '✓ You have everything to make this.' : `You're missing ${st.missing.length}: ${esc(st.missing.map(m => m.ing.name).join(', '))}`}</div>
       <h3 class="sec-h">Ingredients</h3>
       <ul class="ings">
-        ${st.rows.map(({ ing, item, need, ok }) => `<li class="${ing.optional ? 'opt' : ok ? 'ok' : 'miss'}">
+        ${st.rows.map(({ ing, item, need, ok }, i) => `<li class="${ing.optional ? 'opt' : ok ? 'ok' : 'miss'}" data-act="ingInfo" data-id="${r.id}" data-i="${i}">
           <span class="dot"></span>
-          <span class="grow"><b>${esc(ing.amount || '')}</b> ${esc(ing.name)}</span>
-          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${fmtQty(item.qty)}${need !== 1 ? ` / need ${fmtQty(need)}` : ''}` : 'not in stock'}</span>
+          <span class="grow"><b ${k !== 1 && ing.amount ? `title="1× batch: ${esc(ing.amount)}"` : ''}>${esc(scaleAmount(ing.amount, k))}</b> ${esc(ing.name)}</span>
+          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${fmtQty(item.qty)}${need !== 1 ? ` / need ${fmtQty(need)}` : ''}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
+          <span class="chev">›</span>
         </li>`).join('')}
       </ul>
       <h3 class="sec-h">Steps</h3>
@@ -666,10 +817,11 @@ function viewRecipe(id) {
 }
 
 function makeRecipeSheet(r) {
-  const st = recipeStatus(r);
+  const k = scaleOf(r.id);
+  const st = recipeStatus(r, k);
   const tracked = st.rows.filter(x => !x.ing.optional && x.item);
   openSheet(`
-    <h2>Made ${esc(r.title)}?</h2>
+    <h2>Made ${esc(r.title)}${k !== 1 ? ` (${scaleLabel(k)})` : ''}?</h2>
     <p class="muted">These will be taken out of stock:</p>
     <div class="deduct">
       ${tracked.map((x, i) => `<label class="check-line"><input type="checkbox" data-i="${i}" checked>
@@ -692,7 +844,7 @@ function makeRecipeSheet(r) {
         const fresh = db.get('recipes', r.id);
         await db.put('recipes', {
           ...fresh, madeCount: (fresh.madeCount || 0) + 1, lastMade: Date.now(),
-          notes: [...(fresh.notes || []), { id: uid(), at: Date.now(), by: me(), kind: 'made', text: text || 'Made it.' }]
+          notes: [...(fresh.notes || []), { id: uid(), at: Date.now(), by: me(), kind: 'made', text: (text || 'Made it.') + (k !== 1 ? ` [${scaleLabel(k)}]` : '') }]
         });
         close();
         toast('Stock updated', [{ label: 'Undo', run: async () => { for (const [id, q] of undo) await setQty(db.get('items', id), q); } }]);
@@ -715,6 +867,17 @@ function viewRecipeEdit(id) {
   const r = ui.recipeDraft;
   return `
     <a class="back" href="${id === 'new' ? '#/recipes' : '#/recipe/' + id}" data-act="cancelEdit">‹ Cancel</a>
+    ${ui.recipeScan ? `<div class="card scan-recipe busy">
+        <p class="reading">Reading the recipe${ui.recipeScan.n > 1 ? ` (${ui.recipeScan.n} photos)` : ''}… ${ui.recipeScan.progress ? ui.recipeScan.progress + '%' : ''}</p>
+        <div class="bar"><span style="width:${ui.recipeScan.progress || 8}%"></span></div>
+      </div>` : `<div class="card scan-recipe">
+        <div><b>Have it on paper or a screenshot?</b>
+          <p class="small muted">Take or choose a photo (several for multi-page recipes) and the form below fills itself in. ${S.apiKey ? '' : '<a href="#/settings">Add a Claude API key</a> for handwritten cards and tricky layouts.'}</p></div>
+        <div class="scan-recipe-btns">
+          <label class="btn primary small">📷 Take photo<input type="file" accept="image/*" capture="environment" hidden data-change="recipeScan"></label>
+          <label class="btn small">🖼 Choose photos<input type="file" accept="image/*" multiple hidden data-change="recipeScan"></label>
+        </div>
+      </div>`}
     <div class="card form">
       <h2>${id === 'new' ? 'New recipe' : 'Edit recipe'}</h2>
       <div class="photo-pick">
@@ -781,15 +944,16 @@ async function saveRecipe() {
 function printSheet(r) {
   openSheet(`<h2>Print ${esc(r.title)}</h2>
     <label class="check-line"><input type="checkbox" data-notes ${r.notes?.length ? 'checked' : 'disabled'}> Include notes &amp; feedback</label>
+    ${scaleOf(r.id) !== 1 ? `<p>Amounts will print for a <b>${scaleLabel(scaleOf(r.id))}</b>.</p>` : ''}
     <p class="small muted">Formatted for one A4 page. In the print dialog choose paper size A4 and scale “Default/100%”.</p>
     <div class="row-end"><button class="btn primary" data-go>🖨 Print</button></div>`, {
     onMount(s, close) {
-      s.querySelector('[data-go]').onclick = () => { const n = s.querySelector('[data-notes]').checked; close(); printRecipe(r, n); };
+      s.querySelector('[data-go]').onclick = () => { const n = s.querySelector('[data-notes]').checked; close(); printRecipe(r, n, scaleOf(r.id)); };
     }
   });
 }
 
-async function printRecipe(r, includeNotes) {
+async function printRecipe(r, includeNotes, k = 1) {
   const root = $('#print-root');
   const photo = await photoUrl(r.photo);
   const notes = includeNotes ? [...(r.notes || [])].sort((a, b) => b.at - a.at) : [];
@@ -797,10 +961,10 @@ async function printRecipe(r, includeNotes) {
     <div class="pr-head">
       ${photo ? `<img class="pr-thumb" src="${photo}" alt="">` : ''}
       <div><h1>${esc(r.title)}</h1>
-        <div class="pr-meta">${[r.servings && `Serves ${esc(r.servings)}`, r.time && `Time: ${esc(r.time)}`].filter(Boolean).join('   ·   ')}</div></div>
+        <div class="pr-meta">${[r.servings && `Serves ${esc(scaleAmount(r.servings, k))}`, r.time && `Time: ${esc(r.time)}`, k !== 1 && scaleLabel(k)].filter(Boolean).join('   ·   ')}</div></div>
     </div>
     <div class="pr-cols">
-      <section class="pr-ing"><h2>Ingredients</h2><ul>${(r.ingredients || []).map(g => `<li><b>${esc(g.amount || '')}</b> ${esc(g.name)}</li>`).join('')}</ul></section>
+      <section class="pr-ing"><h2>Ingredients</h2><ul>${(r.ingredients || []).map(g => `<li><b>${esc(scaleAmount(g.amount, k))}</b> ${esc(g.name)}</li>`).join('')}</ul></section>
       <section class="pr-steps"><h2>Method</h2><ol>${(r.steps || []).map(s => `<li>${esc(s)}</li>`).join('')}</ol></section>
     </div>
     ${notes.length ? `<section class="pr-notes"><h2>Notes</h2>${notes.map(n => `<p><b>${esc(new Date(n.at).toLocaleDateString())} — ${esc(n.by || '')}:</b> ${esc(n.text)}</p>`).join('')}</section>` : ''}
@@ -853,7 +1017,8 @@ function viewSettings() {
         ${c.map((x, i) => `<div class="cat-row">
           <div class="two tight"><input data-ci="icon" data-i="${i}" value="${esc(x.icon)}" class="icon-in" aria-label="Icon"><input data-ci="name" data-i="${i}" value="${esc(x.name)}" aria-label="Category name"></div>
           <textarea data-ci="subs" data-i="${i}" rows="2" aria-label="Types">${esc(x.subs.join(', '))}</textarea>
-          <label class="mini"><input type="checkbox" data-ci="prepared" data-i="${i}" ${x.prepared ? 'checked' : ''}> prepared food</label>
+          <div class="cat-flags"><label class="mini"><input type="checkbox" data-ci="prepared" data-i="${i}" ${x.prepared ? 'checked' : ''}> prepared food</label>
+          <label class="mini"><input type="checkbox" data-ci="nonFood" data-i="${i}" ${x.nonFood ? 'checked' : ''}> not food (household goods)</label></div>
         </div>`).join('')}
       </div>
       <div class="row-end">
@@ -878,7 +1043,7 @@ function updateCatDraft(el) {
   const c = catDraft[+el.dataset.i]; if (!c) return;
   const k = el.dataset.ci;
   if (k === 'subs') c.subs = el.value.split(',').map(s => s.trim()).filter(Boolean);
-  else if (k === 'prepared') c.prepared = el.checked;
+  else if (k === 'prepared' || k === 'nonFood') c[k] = el.checked;
   else c[k] = el.value.trim();
 }
 // ======================================================================
@@ -918,7 +1083,7 @@ function render() {
   const keep = key ? { key, s: ae.selectionStart, e: ae.selectionEnd } : null;
   const scrollY = window.scrollY;
 
-  if (name !== 'recipe-edit') ui.recipeDraft = null;
+  if (name !== 'recipe-edit') { ui.recipeDraft = null; ui.recipeScan = null; }
   if (name !== 'settings') catDraft = null;
   const html = {
     stock: viewStock, scan: viewScan, grocery: viewGrocery, recipes: viewRecipes,
@@ -997,7 +1162,21 @@ const A = {
   // recipes
   canMakeOnly: () => { ui.canMakeOnly = !ui.canMakeOnly; render(); },
   makeRecipe: b => makeRecipeSheet(db.get('recipes', b.dataset.id)),
-  addMissing: b => addMissing(db.get('recipes', b.dataset.id)),
+  addMissing: b => addMissing(db.get('recipes', b.dataset.id), scaleOf(b.dataset.id)),
+  ingInfo: b => {
+    const r = db.get('recipes', b.dataset.id);
+    const ing = r?.ingredients?.[+b.dataset.i];
+    if (!ing) return;
+    const item = resolveIng(ing);
+    if (item) return itemSheet(item);
+    // not in stock yet: open a new stock item (quantity 0) so price and link can be saved
+    itemSheet(null, { name: ing.name });
+  },
+  setScale: b => { const id = b.dataset.id; ui.recipeScale[id] = +b.dataset.v; ui.scaleCustom[id] = false; delete ui.scaleText[id]; render(); },
+  customScale: b => {
+    const id = b.dataset.id; ui.scaleCustom[id] = true; render();
+    const inp = $('.custom-scale input'); inp?.focus(); inp?.select();
+  },
   printRecipe: b => printSheet(db.get('recipes', b.dataset.id)),
   delNote: async b => {
     const r = db.get('recipes', b.dataset.id);
@@ -1053,7 +1232,47 @@ const A = {
 };
 
 // ---------------- change / input / submit handlers ----------------
+async function runRecipeScan(files) {
+  files = [...files].slice(0, 6);
+  if (!files.length || !ui.recipeDraft) return;
+  const d = ui.recipeDraft;
+  const hasContent = d.ingredients.some(g => g.name.trim()) || d.steps.some(x => x.trim());
+  if (hasContent && !await confirmSheet('Replace with the photo?', '<p>The ingredients and steps already typed in will be replaced by what is read from the photo.</p>', 'Replace')) return;
+  ui.recipeScan = { n: files.length, progress: 0 };
+  render();
+  try {
+    const imgs = [];
+    for (const f of files) imgs.push(await compressImage(f, 1800, 0.85));
+    const rec = S.apiKey
+      ? await readRecipeWithClaude(imgs, { apiKey: S.apiKey, model: S.model, knownNames: items().map(i => i.name) })
+      : await readRecipeWithTesseract(imgs, p => { if (ui.recipeScan) { ui.recipeScan.progress = p; softRender(); } });
+    if (!rec.ingredients.length && !rec.steps.length) throw new Error('no ingredients or steps found — try a sharper, straight-on photo');
+    Object.assign(d, {
+      title: rec.title || d.title,
+      servings: rec.servings || d.servings,
+      time: rec.time || d.time,
+      ingredients: rec.ingredients.length ? rec.ingredients : d.ingredients,
+      steps: rec.steps.length ? rec.steps : d.steps
+    });
+    if (rec.notes) d.notes = [...(d.notes || []), { id: uid(), at: Date.now(), by: me(), text: rec.notes }];
+    toast(`Filled in ${rec.ingredients.length} ingredients and ${rec.steps.length} steps — check it over, then save`, [], 7000);
+  } catch (e) {
+    console.error(e);
+    toast('Could not read the recipe: ' + e.message, [], 9000);
+  }
+  ui.recipeScan = null;
+  render();
+}
+
 const C = {
+  recipeScan: el => runRecipeScan(el.files),
+  recipeScanNew: el => {
+    const files = [...el.files];
+    if (!files.length) return;
+    ui.recipeDraft = { ...blankRecipe(), _for: 'new' };
+    location.hash = '#/recipe-edit/new';
+    setTimeout(() => runRecipeScan(files), 0);
+  },
   scanFile: el => el.files[0] && runScan(el.files[0]),
   gPhoto: async el => { if (el.files[0]) { ui.gDraft.photo = await compressImage(el.files[0], 900); render(); } },
   gCat: el => { ui.gDraft.category = el.value; ui.gDraft.sub = ''; render(); },
@@ -1074,6 +1293,11 @@ const C = {
 const I = {
   stockSearch: el => { ui.stockSearch = el.value; render(); },
   recipeSearch: el => { ui.recipeSearch = el.value; render(); },
+  scaleText: el => {
+    const id = el.dataset.id, v = parseFloat(el.value);
+    ui.scaleText[id] = el.value;
+    if (v > 0 && v <= 100) { ui.recipeScale[id] = v; render(); }
+  },
   gName: el => { ui.gDraft.name = el.value; },
   gQty: el => { ui.gDraft.qty = parseFloat(el.value) || 1; },
   gNote: el => { ui.gDraft.note = el.value; }

@@ -8,6 +8,8 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 - Every food item with a quantity, category → type (e.g. Meats → Poultry / Beef / Seafood), optional photo, unit and notes.
 - **All** view (alphabetical) or **By category** view, with a second row of type filters inside each category.
 - **−** / **+** buttons tick quantities down or up.
+- **Household goods** has its own category, with types for paper goods, cleaning, laundry, dish & kitchen, trash bags, batteries & bulbs, toiletries, medicine & first aid, and pet supplies. Items are sorted into these automatically when you add or scan them ("toilet paper", "dish soap", "AA batteries"...). Household goods never get recipe suggestions.
+- In **By category** view, every category and type is listed, even empty ones, so you can open one and add straight into it.
 - **★ Star** the things you always want in the house. When a starred item drops to **2 or fewer**, it shows up faded at the top of the grocery list until someone taps **Add** (or ✕ for "not now").
 - Tap a non-prepared item (e.g. ground beef) to see every recipe that uses it, with whether you have everything to make it, and a button to put the missing ingredients on the grocery list.
 
@@ -21,10 +23,13 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 - Anyone can add an item, with a quantity, photo, category and note. Each item shows who added it and when.
 - Tick the checkbox when it's picked up. If it matches a stock item, the stock goes up automatically (with Undo). If not, the app offers "Add to stock".
 - All and By category views, same as Stock.
+- **Prices and buy links:** tap an item on the Stock tab, or an ingredient on a recipe, to enter the price you paid (each) and a link to buy it. The grocery list then shows the price per row (price × quantity), a 🔗 button that opens the buy link, and an **Estimated total** bar at the bottom. The total covers what's still to buy and notes any items without a price. You can also set the price and link from a grocery item's edit screen.
 
 **Recipes**
 - A dish photo, ingredients, numbered steps, and timestamped notes/feedback from anyone in the house.
 - Each ingredient has "uses": how many of the matching stock item one batch uses up (for example, 1 pack of ground beef). Tick "staple" for things you don't track, such as salt.
+- **📷 Scan a recipe** (on the Recipes tab, or at the top of a new recipe): photograph a cookbook page, recipe card or screenshot. You can add several photos for a recipe that spans pages. The title, servings, time, ingredients and steps fill themselves in for you to check before saving. Ingredients are matched to your stock names, and basics like salt and pepper are ticked as staples. A Claude API key gives the best results, especially for handwritten cards. Without one, the free reader works for clearly printed recipes with "Ingredients" and "Directions" headings.
+- **Batch size**: on a recipe, pick 0.5×, 1×, 1.5×, 2× or Custom (type any size, e.g. 3 or 0.75). Ingredient amounts, servings, the "have everything?" check, **Made it**, **Add missing** and the printout all follow the batch size. The step text is not changed.
 - **✓ Made it** takes the ingredients out of stock (you can untick any) and logs a "made it" note.
 - **🖨 Print** produces a single A4 page with a thumbnail in the top-left. If the recipe is long, the text shrinks to fit (down to 7pt at most).
 - The "Can make now" filter shows only recipes you have everything for.

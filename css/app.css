@@ -119,6 +119,10 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .chip small { color: var(--muted); font-weight: 500; }
 .chip.on { background: var(--herb); border-color: var(--herb); color: #fff; }
 .chip.on small { color: #cfe0d5; }
+.chip.dim:not(.on) { opacity: .55; }
+@media (min-width: 700px), (hover: hover) and (pointer: fine) { .chips { flex-wrap: wrap; overflow: visible; } }
+.cat-flags { display: flex; gap: .9rem; flex-wrap: wrap; }
+.check-line[hidden] { display: none !important; }
 
 .toolbar { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .6rem; }
 .toolbar-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; }
@@ -239,10 +243,45 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .note-meta .linkish { margin-left: auto; color: var(--muted); }
 .recipe-mini { cursor: pointer; }
 
+/* prices & links */
+.money-in, .link-in { display: flex; align-items: center; gap: .4rem; margin-top: .25rem; }
+.money-in > span { font-weight: 700; color: var(--ink); }
+.money-in input { max-width: 140px; margin: 0 !important; }
+.link-in input { flex: 1; margin: 0 !important; }
+.field-note { display: block; font-weight: 400; font-size: .75rem; margin-top: .2rem; }
+.row .price { font-weight: 600; color: var(--herb-2); font-size: .85rem; margin-left: .2rem; }
+.buy-link { flex: none; text-decoration: none; font-size: 1.15rem; padding: .35rem .45rem; border-radius: 9px; background: var(--cream); border: 1px solid var(--line); }
+.total-bar {
+  position: sticky; bottom: calc(var(--tab-h) + 10px + env(safe-area-inset-bottom)); z-index: 12;
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  margin-top: 1rem; padding: .75rem 1rem; border-radius: 14px;
+  background: var(--herb); color: #fff; box-shadow: 0 6px 18px rgba(47,74,58,.3);
+}
+.total-bar span { font-weight: 600; }
+.total-bar small { display: block; font-weight: 400; font-size: .75rem; color: #cfe0d5; }
+.total-bar b { font-size: 1.3rem; font-variant-numeric: tabular-nums; }
+.ings li { cursor: pointer; }
+.ings li:active { background: var(--cream); }
+.ings .have { text-align: right; line-height: 1.3; }
+.ings .chev { color: #c9c2b4; font-size: 1.2rem; margin-left: -.2rem; }
+
+/* batch scaling */
+.scale-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: .2rem 0 .7rem; }
+.scale-lbl { font-weight: 700; font-size: .85rem; color: var(--muted); }
+.scale-bar .seg button { padding: .4rem .7rem; font-variant-numeric: tabular-nums; }
+.custom-scale { display: inline-flex; align-items: center; gap: .25rem; font-weight: 700; }
+.custom-scale input { width: 80px; text-align: center; }
+.scale-note { margin: -.3rem 0 .7rem; }
+
 /* recipe editor */
+.scan-recipe { display: flex; gap: .8rem; align-items: center; justify-content: space-between; flex-wrap: wrap; background: #fff8ea; border-color: #f0d9ad; }
+.scan-recipe p { margin: .2rem 0 0; }
+.scan-recipe-btns { display: flex; gap: .4rem; flex-wrap: wrap; }
+.scan-recipe.busy { display: block; }
+.scan-chip { cursor: pointer; }
 .photo-pick { display: flex; align-items: center; gap: .7rem; margin-bottom: .8rem; }
 .big-thumb { width: 84px; height: 84px; border-radius: 12px; object-fit: cover; display: grid; place-items: center; font-size: 1.8rem; background: #efe8db; }
-.ing-row { display: grid; grid-template-columns: 80px 1fr 60px auto auto; gap: .35rem; align-items: center; margin-bottom: .45rem; }
+.ing-row { display: grid; grid-template-columns: minmax(96px, 30%) 1fr 60px auto auto; gap: .35rem; align-items: center; margin-bottom: .45rem; }
 .ing-row .link-hint { grid-column: 2 / -1; font-size: .74rem; color: var(--muted); margin-top: -.2rem; }
 .step-row { display: flex; gap: .45rem; align-items: flex-start; margin-bottom: .5rem; }
 .step-row .num { width: 26px; height: 26px; border-radius: 50%; background: var(--herb); color: #fff; display: grid; place-items: center; font-size: .8rem; font-weight: 700; flex: none; margin-top: .45rem; }
@@ -273,7 +312,7 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .toast.out { opacity: 0; }
 
 @media (max-width: 420px) {
-  .ing-row { grid-template-columns: 64px 1fr 52px auto; }
+  .ing-row { grid-template-columns: 96px 1fr 52px auto; }
   .ing-row .mini { grid-column: 2; }
   .ing-row .icon-btn { grid-row: 1; grid-column: 4; }
   .btn.big { min-height: 56px; font-size: .95rem; }
