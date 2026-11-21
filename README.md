@@ -5,13 +5,16 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 ## What it does
 
 **Stock**
+- Three columns: **Fridge**, **Pantry** and **Deep freezer**. On a phone, a switcher at the top shows one column at a time. Each item's location is set on its screen ("Kept in"). New items get a sensible default: meat and dairy go in the fridge, frozen foods and ice cream in the freezer, dry goods and household goods in the pantry.
+- **Time in inventory:** each item counts the days since it was added. The counter restarts when an item is restocked after running out, or when you tap **Restocked today** on the item. Rows show the age (⏱ 5d, 6mo...).
+- **Freshness borders:** a yellow border appears after the warning limit and a red border after double the limit. Defaults: fridge 14 days, pantry 365 days, deep freezer 180 days. Change them in ⚙︎ Settings → Freshness warnings (shared with the household). Any item can have its own limit ("Warn after (days)"). Household goods and items with 0 left don't get borders.
 - Every food item with a quantity, category → type (e.g. Meats → Poultry / Beef / Seafood), optional photo, unit and notes.
 - **All** view (alphabetical) or **By category** view, with a second row of type filters inside each category.
 - **−** / **+** buttons tick quantities down or up.
 - **Household goods** has its own category, with types for paper goods, cleaning, laundry, dish & kitchen, trash bags, batteries & bulbs, toiletries, medicine & first aid, and pet supplies. Items are sorted into these automatically when you add or scan them ("toilet paper", "dish soap", "AA batteries"...). Household goods never get recipe suggestions.
 - In **By category** view, every category and type is listed, even empty ones, so you can open one and add straight into it.
 - **★ Star** the things you always want in the house. When a starred item drops to **2 or fewer**, it shows up faded at the top of the grocery list until someone taps **Add** (or ✕ for "not now").
-- Tap a non-prepared item (e.g. ground beef) to see every recipe that uses it, with whether you have everything to make it, and a button to put the missing ingredients on the grocery list.
+- Tap an item to see **Suggested recipes** that use it at the bottom of its screen. Recipes you can make right now are listed first. Ones with missing ingredients have an **🛒 Add to grocery list** button.
 
 **Scan list**
 - Take a photo of a list ("3 ground beef", "milk x2", "eggs - 12", "2 lb chicken"...). The app reads it, matches each line to existing stock, and shows a review screen before changing anything.

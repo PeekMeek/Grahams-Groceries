@@ -166,7 +166,48 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .thumb.ph { display: inline-block; background: repeating-linear-gradient(45deg, #f0eadf, #f0eadf 6px, #ebe3d5 6px, #ebe3d5 12px); }
 .star { background: none; border: 0; font-size: 1.25rem; color: #d6cfc2; cursor: pointer; padding: 0 .1rem; }
 .star.on { color: var(--mustard); }
-.row.item.low { border-color: #f0c98c; background: #fffaf1; }
+.row.item.low { background: #fffaf1; }
+/* time in inventory */
+:root { --aging: #e0b000; --old: #d23f2f; }
+.row.item.aging { border: 2px solid var(--aging); padding: calc(.55rem - 1px) calc(.65rem - 1px); }
+.row.item.old { border: 2px solid var(--old); padding: calc(.55rem - 1px) calc(.65rem - 1px); }
+.age { white-space: nowrap; }
+.age.aging { color: #9a7400; font-weight: 700; }
+.age.old { color: var(--old); font-weight: 700; }
+.age-box { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; margin: .3rem 0 .9rem; padding: .6rem .8rem; border-radius: 12px; background: var(--paper); border: 1px solid var(--line); }
+.age-box > div > span.small { display: block; }
+.age-box.aging { border: 2px solid var(--aging); background: #fffbea; }
+.age-box.old { border: 2px solid var(--old); background: #fdf0ee; }
+.age-sample { padding: 0 .3rem; border-radius: 5px; }
+.age-sample.aging { border: 2px solid var(--aging); }
+.age-sample.old { border: 2px solid var(--old); }
+.age-set { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem; }
+.days-in { display: flex; align-items: center; gap: .4rem; margin-top: .25rem; color: var(--ink); font-weight: 500; }
+.days-in input { max-width: 100px; margin: 0 !important; }
+.field-label { font-size: .85rem; font-weight: 600; color: var(--muted); margin-bottom: .25rem; }
+.loc-pick { margin: 0 0 .7rem !important; }
+.warn-days[hidden] { display: none !important; }
+.suggested { margin-top: 1.2rem; padding-top: .2rem; border-top: 1px solid var(--line); }
+
+/* stock: Fridge / Pantry / Deep freezer */
+.stock-hint { text-align: center; margin: .2rem 0 .8rem; }
+.loc-switch { display: flex; margin: .2rem 0 .7rem; }
+.loc-switch button small { color: var(--muted); font-weight: 500; }
+.loc-cols { display: block; }
+.loc-col { display: none; }
+.loc-col.on { display: block; }
+.loc-h { display: none; }
+.col-empty { color: var(--muted); text-align: center; padding: 1.2rem 0; font-size: .9rem; }
+.add-here { width: 100%; border-style: dashed; margin-top: .2rem; }
+@media (min-width: 1100px) {
+  #view[data-route=stock] { max-width: 1600px; }
+  #view[data-route=stock] .toolbar, #view[data-route=stock] .stock-hint { max-width: 760px; margin-left: auto; margin-right: auto; }
+  #view[data-route=stock] .fab, #view .seg.loc-switch { display: none; }
+  .loc-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.2rem; align-items: start; margin-top: .6rem; }
+  .loc-col, .loc-col.on { display: block; background: rgba(255,255,255,.5); border: 1px solid var(--line); border-radius: 18px; padding: .8rem; min-height: 260px; }
+  .loc-h { display: flex; align-items: baseline; justify-content: space-between; padding: .1rem .3rem .7rem; font-size: 1.2rem; font-weight: 800; letter-spacing: .01em; }
+  .loc-h small { font-size: .85rem; color: var(--muted); font-weight: 600; }
+}
 .row.item.out .name { color: var(--muted); }
 .stepper { display: flex; align-items: center; background: var(--cream); border-radius: 11px; border: 1px solid var(--line); }
 .stepper button { width: 40px; height: 40px; border: 0; background: none; font-size: 1.3rem; font-weight: 700; cursor: pointer; color: var(--herb); }

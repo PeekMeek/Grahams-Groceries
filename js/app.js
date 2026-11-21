@@ -14,6 +14,7 @@ const me = () => S.name || 'Someone';
 
 // ---------------- UI state (survives re-renders) ----------------
 const ui = {
+  stockLoc: 'fridge',
   stockMode: 'all', stockCat: null, stockSub: null, stockSearch: '', starredOnly: false,
   gMode: 'all', gCat: null, gSub: null, showDone: false,
   gDraft: { name: '', qty: 1, photo: null, category: '', sub: '', note: '' },
@@ -213,10 +214,46 @@ function recipeStatus(r, scale = 1) {
 }
 const recipesUsing = it => db.list('recipes').filter(r => (r.ingredients || []).some(ing => resolveIng(ing)?.id === it.id));
 
+// ---------------- storage locations & time in inventory ----------------
+const LOCS = [
+  { id: 'fridge', name: 'Fridge', icon: '🥛' },
+  { id: 'pantry', name: 'Pantry', icon: '🥫' },
+  { id: 'freezer', name: 'Deep freezer', icon: '❄️' }
+];
+const loc = id => LOCS.find(l => l.id === id) || LOCS[1];
+// Days before an item gets a yellow border (red at double). Shared by the household; editable in Settings.
+const AGE_DEFAULTS = { fridge: 14, pantry: 365, freezer: 180 };
+const ageDays = () => ({ ...AGE_DEFAULTS, ...(db.get('meta', 'settings')?.ageDays || {}) });
+function defaultLocation(category, sub) {
+  if (category === 'frozen' || sub === 'Ice cream') return 'freezer';
+  if (['meats', 'dairy', 'prepared'].includes(category)) return 'fridge';
+  if (category === 'veggies') return ['Onions & garlic', 'Root vegetables'].includes(sub) ? 'pantry' : 'fridge';
+  if (category === 'fruit') return sub === 'Berries' ? 'fridge' : 'pantry';
+  return 'pantry';
+}
+const locOf = it => LOCS.some(l => l.id === it.location) ? it.location : defaultLocation(it.category, it.sub);
+const DAY = 86400000;
+const stockedAt = it => it.stockedAt || it.createdAt || it.updatedAt || Date.now();
+const daysIn = it => Math.max(0, Math.floor((Date.now() - stockedAt(it)) / DAY));
+const ageLimit = it => +it.warnDays > 0 ? +it.warnDays : ageDays()[locOf(it)];
+// '' (fine), 'aging' (past the limit: yellow) or 'old' (past double: red). Household goods and empty items don't age.
+function ageState(it) {
+  if (isNonFood(it) || it.qty <= 0) return '';
+  const d = daysIn(it), t = ageLimit(it);
+  return d >= 2 * t ? 'old' : d >= t ? 'aging' : '';
+}
+const fmtDays = d => d === 0 ? 'less than a day' : d === 1 ? '1 day' : `${d} days`;
+const shortDays = d => d < 1 ? 'new' : d < 60 ? `${d}d` : d < 730 ? `${Math.floor(d / 30.4)}mo` : `${Math.floor(d / 365)}y`;
+
 async function setQty(it, qty) {
   qty = Math.max(0, Math.round(qty * 100) / 100);
   const patch = { ...it, qty };
   if (qty > LOW) patch.lowDismissed = false;
+  if (!LOCS.some(l => l.id === patch.location)) patch.location = locOf(it);
+  if (!patch.createdAt) patch.createdAt = it.updatedAt || Date.now();
+  // the time-in-inventory counter restarts when an item is restocked after running out
+  if ((+it.qty || 0) <= 0 && qty > 0) patch.stockedAt = Date.now();
+  else if (!patch.stockedAt) patch.stockedAt = stockedAt(it);
   return db.put('items', patch);
 }
 
@@ -299,12 +336,14 @@ function grouped(list, rowFn) {
 // ---------------- Stock ----------------
 function itemRow(it) {
   const c = cat(it.category);
-  return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''}" data-act="openItem" data-id="${it.id}">
+  const age = ageState(it), d = daysIn(it);
+  const ageTag = it.qty > 0 && !isNonFood(it) ? ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>` : '';
+  return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}">
     <button class="star ${it.starred ? 'on' : ''}" data-act="star" data-id="${it.id}" aria-label="Star">★</button>
     ${thumb(it.photo)}
     <div class="grow">
       <div class="name">${esc(it.name)}</div>
-      <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
+      <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
     </div>
     <div class="stepper">
       <button data-act="dec" data-id="${it.id}" aria-label="Use one">−</button>
@@ -321,13 +360,19 @@ function viewStock() {
   if (q) list = list.filter(i => normalize(i.name).includes(q));
   const filterBar = catFilter(list, ui.stockMode, ui.stockCat, ui.stockSub, 'stock', true);
   const shown = ui.stockMode === 'cat' ? applyCatFilter(list, ui.stockCat, ui.stockSub) : list;
-  const inCatView = ui.stockMode === 'cat' && ui.stockCat;
-  const body = !db.list('items').length && !inCatView
-    ? `<div class="empty"><p>Nothing in stock yet.</p><p>Add items one by one, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p></div>`
-    : !shown.length ? (inCatView && !q
-      ? `<div class="empty"><p>No ${esc((ui.stockSub && ui.stockSub !== 'Unsorted' ? ui.stockSub : cat(ui.stockCat).name).toLowerCase())} in stock yet.</p><button class="btn" data-act="newItem">＋ Add ${esc(cat(ui.stockCat).name.toLowerCase())}</button></div>`
-      : `<div class="empty"><p>Nothing matches.</p></div>`)
-    : ui.stockMode === 'cat' && !ui.stockCat ? grouped(shown, itemRow) : shown.map(itemRow).join('');
+  const filtering = q || ui.starredOnly || (ui.stockMode === 'cat' && ui.stockCat);
+  const none = !db.list('items').length;
+  const column = l => {
+    const inLoc = shown.filter(it => locOf(it) === l.id);
+    const body = inLoc.length
+      ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(itemRow).join(''))
+      : `<p class="col-empty">${filtering ? 'Nothing matches here.' : 'Nothing here yet.'}</p>`;
+    return `<section class="loc-col ${ui.stockLoc === l.id ? 'on' : ''}">
+      <header class="loc-h"><span>${l.icon} ${l.name}</span><small>${inLoc.length}</small></header>
+      <div class="list">${body}</div>
+      <button class="btn ghost small add-here" data-act="newItemAt" data-loc="${l.id}">＋ Add to ${l.name.toLowerCase()}</button>
+    </section>`;
+  };
   return `
     <div class="toolbar">
       <input id="stock-search" type="search" placeholder="Search stock…" value="${esc(ui.stockSearch)}" data-input="stockSearch">
@@ -340,30 +385,51 @@ function viewStock() {
       </div>
       ${filterBar}
     </div>
-    <div class="list">${body}</div>
-    <button class="fab" data-act="newItem">＋ Add item</button>`;
+    ${none ? `<p class="stock-hint muted">Nothing in stock yet. Add items to a column below, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p>` : ''}
+    <div class="seg full loc-switch">
+      ${LOCS.map(l => `<button class="${ui.stockLoc === l.id ? 'on' : ''}" data-act="stockLoc" data-v="${l.id}">${l.icon} ${l.name} <small>${shown.filter(it => locOf(it) === l.id).length}</small></button>`).join('')}
+    </div>
+    <div class="loc-cols">${LOCS.map(column).join('')}</div>
+    <button class="fab" data-act="newItemAt" data-loc="${ui.stockLoc}">＋ Add item</button>`;
 }
 
 function itemSheet(it, prefill = null) {
   const isNew = !it;
   it = it || { id: uid(), name: '', qty: 1, unit: '', starred: false, category: ui.stockCat || 'other', sub: ui.stockSub && ui.stockSub !== 'Unsorted' ? ui.stockSub : '', photo: null, notes: '' };
-  if (isNew && prefill?.name) it = { ...it, qty: 0, ...guessCategory(prefill.name), ...prefill };
+  if (isNew && prefill) it = { ...it, ...(prefill.name ? { qty: 0, ...guessCategory(prefill.name) } : {}), ...prefill };
   let photo = it.photo;
-  const recipes = !isNew && !isPrepared(it) ? recipesUsing(it) : [];
-  const recipesHtml = isNew || isPrepared(it) ? '' : `
-    <h3 class="sec-h">Recipes with ${esc(it.name)}</h3>
-    ${recipes.length ? recipes.map(r => {
-      const st = recipeStatus(r);
-      return `<div class="row recipe-mini" data-go="#/recipe/${r.id}">
+  let where = isNew ? (prefill?.location || defaultLocation(it.category, it.sub)) : locOf(it);
+  let whereTouched = !isNew || !!prefill?.location;
+  let restockedAt = null;
+  // Suggested recipes: ones you can make first, then fewest missing
+  const recipes = isNew || isNonFood(it) ? [] : recipesUsing(it)
+    .map(r => ({ r, st: recipeStatus(r) }))
+    .sort((a, b) => a.st.missing.length - b.st.missing.length || a.r.title.localeCompare(b.r.title));
+  const onList = st => st.missing.every(m => m.item ? groceryFor(m.item) : activeGrocery().some(g => normalize(g.name) === normalize(m.ing.name)));
+  const recipesHtml = isNew || isNonFood(it) || (isPrepared(it) && !recipes.length) ? '' : `
+    <div class="suggested">
+    <h3 class="sec-h">Suggested recipes</h3>
+    ${recipes.length ? recipes.map(({ r, st }) => `<div class="row recipe-mini" data-go="#/recipe/${r.id}">
         ${thumb(r.photo)}
         <div class="grow"><div class="name">${esc(r.title)}</div>
           <div class="meta">${st.canMake ? '<b class="ok">✓ You have everything</b>' : `<b class="warn">Missing:</b> ${esc(st.missing.map(m => m.ing.name).join(', '))}`}</div></div>
-        ${st.canMake ? '' : `<button class="btn small" data-addmissing="${r.id}">🛒 Add missing</button>`}
+        ${st.canMake ? '' : onList(st)
+          ? '<button class="btn small" disabled>✓ On the list</button>'
+          : `<button class="btn small" data-addmissing="${r.id}">🛒 Add to grocery list</button>`}
+      </div>`).join('') : `<p class="muted">No saved recipes use ${esc(it.name)} yet. <a href="#/recipe-edit/new" data-close>Add one</a>.</p>`}
+    </div>`;
+  const d = daysIn(it), lim = ageLimit(it), age = ageState(it);
+  const ageHtml = isNew ? '' : it.qty <= 0
+    ? `<div class="age-box"><b>Out of stock.</b> The time-in-inventory counter restarts when it's restocked.</div>`
+    : `<div class="age-box ${age}">
+        <div><b>In inventory: <span data-age-days>${fmtDays(d)}</span></b>
+          <span class="small muted">since ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}${isNonFood(it) ? '' : ` · ${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'warns after'} ${lim} days`}</span></div>
+        <button type="button" class="btn small ghost" data-restock>Restocked today</button>
       </div>`;
-    }).join('') : `<p class="muted">No saved recipes use this yet. <a href="#/recipe-edit/new" data-close>Add one</a>.</p>`}`;
 
   openSheet(`
     <h2>${isNew ? 'Add item' : esc(it.name)}</h2>
+    ${ageHtml}
     <div class="form">
       <div class="photo-pick">
         <div class="pp-img">${thumb(photo, 'big-thumb')}</div>
@@ -378,6 +444,11 @@ function itemSheet(it, prefill = null) {
         <label>Quantity<input data-f="qty" type="number" step="any" min="0" value="${fmtQty(it.qty)}"></label>
         <label>Unit (optional)<input data-f="unit" value="${esc(it.unit || '')}" placeholder="pack, lb, can…"></label>
       </div>
+      <div class="field-label">Kept in</div>
+      <div class="seg full loc-pick">${LOCS.map(l => `<button type="button" data-where="${l.id}" class="${where === l.id ? 'on' : ''}">${l.icon} ${l.name}</button>`).join('')}</div>
+      <label class="warn-days" ${isNonFood(it) ? 'hidden' : ''}>Warn after (days)
+        <input data-f="warnDays" type="number" min="1" step="1" inputmode="numeric" value="${+it.warnDays > 0 ? +it.warnDays : ''}" placeholder="${ageDays()[where]} — ${loc(where).name.toLowerCase()} default">
+      </label>
       ${priceLinkFields(it.price, it.link, it.priceAt)}
       <label class="check-line"><input type="checkbox" data-f="starred" ${it.starred ? 'checked' : ''}> ★ Starred — suggest for the grocery list when ${LOW} or fewer are left</label>
       <label class="check-line prep-line" ${isNonFood(it) ? 'hidden' : ''}><input type="checkbox" data-f="prepared" ${!isNonFood(it) && isPrepared(it) ? 'checked' : ''}> Prepared / ready-to-eat (no recipe suggestions)</label>
@@ -390,8 +461,27 @@ function itemSheet(it, prefill = null) {
     ${recipesHtml}`, {
     onMount(s, close) {
       const f = k => s.querySelector(`[data-f="${k}"]`);
-      const syncPrep = () => { s.querySelector('.prep-line').hidden = !!cat(f('category').value).nonFood; };
+      const setWhere = w => {
+        where = w;
+        s.querySelectorAll('[data-where]').forEach(b => b.classList.toggle('on', b.dataset.where === w));
+        f('warnDays').placeholder = `${ageDays()[w]} — ${loc(w).name.toLowerCase()} default`;
+      };
+      const syncPrep = () => {
+        const nf = !!cat(f('category').value).nonFood;
+        s.querySelector('.prep-line').hidden = nf;
+        s.querySelector('.warn-days').hidden = nf;
+        if (!whereTouched) setWhere(defaultLocation(f('category').value, f('sub').value));
+      };
+      s.querySelectorAll('[data-where]').forEach(b => b.onclick = () => { whereTouched = true; setWhere(b.dataset.where); });
       f('category').onchange = () => { f('sub').innerHTML = subOptions(f('category').value, ''); syncPrep(); };
+      f('sub').addEventListener('change', syncPrep);
+      s.querySelector('[data-restock]')?.addEventListener('click', e => {
+        restockedAt = Date.now();
+        s.querySelector('[data-age-days]').textContent = fmtDays(0);
+        s.querySelector('.age-box').className = 'age-box';
+        e.target.textContent = '✓ Counter reset — tap Save';
+        e.target.disabled = true;
+      });
       f('photo').onchange = async e => {
         if (!e.target.files[0]) return;
         photo = await compressImage(e.target.files[0], 600);
@@ -419,6 +509,9 @@ function itemSheet(it, prefill = null) {
           price, priceAt: price === (it.price ?? null) ? it.priceAt : (price == null ? null : Date.now()),
           link: cleanLink(f('link').value),
           starred: f('starred').checked, photo,
+          location: where,
+          warnDays: parseInt(f('warnDays').value) > 0 ? parseInt(f('warnDays').value) : null,
+          ...(restockedAt ? { stockedAt: restockedAt } : {}),
           prepared: cat(category).nonFood || prepared === !!cat(category).prepared ? undefined : prepared
         }, parseFloat(f('qty').value) || 0);
         close();
@@ -435,7 +528,12 @@ function itemSheet(it, prefill = null) {
       });
       s.addEventListener('click', async e => {
         const am = e.target.closest('[data-addmissing]');
-        if (am) { e.stopPropagation(); await addMissing(db.get('recipes', am.dataset.addmissing)); return; }
+        if (am) {
+          e.stopPropagation();
+          await addMissing(db.get('recipes', am.dataset.addmissing));
+          am.textContent = '✓ On the list'; am.disabled = true;
+          return;
+        }
         const go = e.target.closest('[data-go]');
         if (go) { close(); location.hash = go.dataset.go; }
         if (e.target.closest('[data-close]')) close();
@@ -549,7 +647,7 @@ async function applyScan() {
       await setQty(cur, q); updated++;
     } else {
       if (sc.mode === 'use') continue;
-      await db.put('items', { id: uid(), name: r.name.trim(), qty: r.qty, unit: r.unit || '', category: r.category, sub: r.sub || '', starred: false, photo: null });
+      await db.put('items', { id: uid(), name: r.name.trim(), qty: r.qty, unit: r.unit || '', category: r.category, sub: r.sub || '', location: defaultLocation(r.category, r.sub), starred: false, photo: null, createdAt: Date.now(), stockedAt: Date.now() });
       added++;
     }
   }
@@ -661,7 +759,7 @@ async function toggleDone(g, checked) {
       toast(`Picked up ${g.name}`, [{
         label: 'Add to stock', run: async () => {
           const id = uid();
-          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', starred: false, photo: g.photo || null, price: g.price ?? null, priceAt: g.price != null ? Date.now() : null, link: g.link || '' });
+          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', location: defaultLocation(g.category, g.sub), createdAt: Date.now(), stockedAt: Date.now(), starred: false, photo: g.photo || null, price: g.price ?? null, priceAt: g.price != null ? Date.now() : null, link: g.link || '' });
           await db.put('grocery', { ...db.get('grocery', g.id), itemId: id });
         }
       }], 7000);
@@ -1005,6 +1103,13 @@ function viewSettings() {
       </div>
     </div>
     <div class="card form">
+      <h2>Freshness warnings</h2>
+      <p class="small muted">Food gets a <b class="age-sample aging">yellow border</b> after this many days in inventory and a <b class="age-sample old">red border</b> after double. Individual items can have their own limit (“Warn after” on the item). Shared with the household.</p>
+      <div class="age-set">
+        ${LOCS.map(l => `<label>${l.icon} ${l.name}<span class="days-in"><input type="number" min="1" step="1" inputmode="numeric" value="${ageDays()[l.id]}" data-change="ageDays" data-loc="${l.id}"> days</span></label>`).join('')}
+      </div>
+    </div>
+    <div class="card form">
       <h2>Reading handwritten lists</h2>
       <p class="small muted">Optional. With an Anthropic API key, photos are read by Claude, which handles handwriting well. The key is stored only on this device. Without it, a free built-in reader is used (works best on neat, printed text).</p>
       <label>Anthropic API key<input data-set="apiKey" type="password" value="${esc(S.apiKey || '')}" placeholder="sk-ant-…" autocomplete="off"></label>
@@ -1126,6 +1231,8 @@ const A = {
   stockSub: b => { ui.stockSub = b.dataset.v || null; render(); },
   starredOnly: () => { ui.starredOnly = !ui.starredOnly; render(); },
   newItem: () => itemSheet(null),
+  newItemAt: b => itemSheet(null, { location: b.dataset.loc }),
+  stockLoc: b => { ui.stockLoc = b.dataset.v; render(); },
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
   inc: b => { const it = db.get('items', b.dataset.id); setQty(it, it.qty + 1); },
@@ -1265,6 +1372,13 @@ async function runRecipeScan(files) {
 }
 
 const C = {
+  ageDays: el => {
+    const v = parseInt(el.value);
+    if (!(v > 0)) return toast('Enter a number of days');
+    const cur = db.get('meta', 'settings') || { id: 'settings' };
+    db.put('meta', { ...cur, ageDays: { ...ageDays(), [el.dataset.loc]: v } });
+    toast(`${loc(el.dataset.loc).name}: warn after ${v} days`);
+  },
   recipeScan: el => runRecipeScan(el.files),
   recipeScanNew: el => {
     const files = [...el.files];
