@@ -6,6 +6,7 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 
 **Stock**
 - Three columns: **Fridge**, **Pantry** and **Deep freezer**. On a phone, a switcher at the top shows one column at a time. Each item's location is set on its screen ("Kept in"). New items get a sensible default: meat and dairy go in the fridge, frozen foods and ice cream in the freezer, dry goods and household goods in the pantry.
+- **Moving items:** tap **⇄** on any row and pick Fridge, Pantry or Deep freezer (with Undo). On a computer you can also drag a row onto another column. The time-in-inventory counter keeps running when you move something.
 - **Time in inventory:** each item counts the days since it was added. The counter restarts when an item is restocked after running out, or when you tap **Restocked today** on the item. Rows show the age (⏱ 5d, 6mo...).
 - **Freshness borders:** a yellow border appears after the warning limit and a red border after double the limit. Defaults: fridge 14 days, pantry 365 days, deep freezer 180 days. Change them in ⚙︎ Settings → Freshness warnings (shared with the household). Any item can have its own limit ("Warn after (days)"). Household goods and items with 0 left don't get borders.
 - Every food item with a quantity, category → type (e.g. Meats → Poultry / Beef / Seafood), optional photo, unit and notes.

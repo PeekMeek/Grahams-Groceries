@@ -338,13 +338,14 @@ function itemRow(it) {
   const c = cat(it.category);
   const age = ageState(it), d = daysIn(it);
   const ageTag = it.qty > 0 && !isNonFood(it) ? ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>` : '';
-  return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}">
+  return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}" draggable="true">
     <button class="star ${it.starred ? 'on' : ''}" data-act="star" data-id="${it.id}" aria-label="Star">★</button>
     ${thumb(it.photo)}
     <div class="grow">
       <div class="name">${esc(it.name)}</div>
       <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
     </div>
+    <button class="move-btn" data-act="moveMenu" data-id="${it.id}" aria-label="Move to fridge, pantry or freezer" title="Move">⇄</button>
     <div class="stepper">
       <button data-act="dec" data-id="${it.id}" aria-label="Use one">−</button>
       <span class="q">${fmtQty(it.qty)}</span>
@@ -367,7 +368,7 @@ function viewStock() {
     const body = inLoc.length
       ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(itemRow).join(''))
       : `<p class="col-empty">${filtering ? 'Nothing matches here.' : 'Nothing here yet.'}</p>`;
-    return `<section class="loc-col ${ui.stockLoc === l.id ? 'on' : ''}">
+    return `<section class="loc-col ${ui.stockLoc === l.id ? 'on' : ''}" data-loc="${l.id}">
       <header class="loc-h"><span>${l.icon} ${l.name}</span><small>${inLoc.length}</small></header>
       <div class="list">${body}</div>
       <button class="btn ghost small add-here" data-act="newItemAt" data-loc="${l.id}">＋ Add to ${l.name.toLowerCase()}</button>
@@ -542,6 +543,31 @@ function itemSheet(it, prefill = null) {
   });
 }
 
+// ---------------- moving between Fridge / Pantry / Deep freezer ----------------
+async function moveItem(it, to) {
+  if (!it || locOf(it) === to) return;
+  const from = locOf(it);
+  await db.put('items', { ...it, location: to });
+  toast(`Moved ${it.name} to the ${loc(to).name.toLowerCase()}`, [{
+    label: 'Undo', run: () => db.put('items', { ...db.get('items', it.id), location: from })
+  }]);
+}
+
+function moveSheet(it) {
+  if (!it) return;
+  const here = locOf(it);
+  openSheet(`<h2>Move ${esc(it.name)}</h2>
+    <p class="muted small">Now in the ${esc(loc(here).name.toLowerCase())}. The time-in-inventory counter keeps running; tap “Restocked today” on the item if you want it to start over.</p>
+    <div class="move-opts">
+      ${LOCS.map(l => `<button class="btn big ${l.id === here ? 'here' : ''}" data-to="${l.id}" ${l.id === here ? 'disabled' : ''}>
+        <span class="mo-icon">${l.icon}</span>${l.name}${l.id === here ? '<small>here now</small>' : ''}</button>`).join('')}
+    </div>`, {
+    onMount(s, close) {
+      s.querySelectorAll('[data-to]').forEach(b => b.onclick = async () => { close(); await moveItem(db.get('items', it.id), b.dataset.to); });
+    }
+  });
+}
+
 // ---------------- Scan list ----------------
 function viewScan() {
   const sc = ui.scan;
@@ -554,7 +580,7 @@ function viewScan() {
         <label class="btn primary big">📷 Take photo<input type="file" accept="image/*" capture="environment" hidden data-change="scanFile"></label>
         <label class="btn big">🖼 Choose photo<input type="file" accept="image/*" hidden data-change="scanFile"></label>
       </div>
-      <p class="small muted">Reading with: ${engine}. ${S.apiKey ? '' : '<a href="#/settings">Add a Claude API key</a> for handwriting.'}</p>
+      ${S.apiKey ? `<p class="small muted">Reading with: ${engine}.</p>` : `<p class="scan-note"><b>Handwritten list?</b> The free reader only handles neat printed text. <a href="#/settings">Add a Claude API key</a> to read handwriting.</p>`}
     </div>
     <div class="card">
       <h3>Or type / paste a list</h3>
@@ -603,6 +629,11 @@ function viewScan() {
         ${sc.photo ? `<img class="scan-thumb" src="${sc.photo}" alt="" data-act="viewScanPhoto">` : ''}
         <div><h2>Check the list</h2><p class="muted small">${sc.rows.length} line${sc.rows.length === 1 ? '' : 's'} found. Fix anything that was misread, then apply.</p></div>
       </div>
+      ${sc.unreadable ? `<div class="scan-warn">
+        <b>⚠️ The free reader couldn't read this photo${sc.dropped ? ` — ${sc.dropped} unreadable line${sc.dropped > 1 ? 's were' : ' was'} skipped` : ''}.</b>
+        <p>It only reads neat printed text, not handwriting. For handwritten lists, add a Claude API key in Settings (a few cents per photo), or type the list instead.</p>
+        <div class="row-end"><a class="btn small" href="#/settings">Open Settings</a><button class="btn small ghost" data-act="scanReset">Type the list</button></div>
+      </div>` : ''}
       <div class="seg full">
         <button class="${sc.mode === 'add' ? 'on' : ''}" data-act="scanMode" data-v="add">Add to stock</button>
         <button class="${sc.mode === 'set' ? 'on' : ''}" data-act="scanMode" data-v="set">Set counts</button>
@@ -632,10 +663,10 @@ async function runScan(file) {
   ui.scan = { stage: 'reading', photo, progress: 0, mode: 'add' };
   render();
   try {
-    const parsed = S.apiKey
-      ? await readWithClaude(photo, { apiKey: S.apiKey, model: S.model, knownNames: items().map(i => i.name) })
-      : await readWithTesseract(photo, p => { ui.scan.progress = p; if (route().name === 'scan') render(); });
-    ui.scan = { stage: 'review', photo: await compressImage(file, 500), rows: scanRowsFrom(parsed), mode: 'add' };
+    let parsed, unreadable = false, dropped = 0;
+    if (S.apiKey) parsed = await readWithClaude(photo, { apiKey: S.apiKey, model: S.model, knownNames: items().map(i => i.name) });
+    else ({ rows: parsed, unreadable, dropped } = await readWithTesseract(photo, p => { ui.scan.progress = p; if (route().name === 'scan') render(); }));
+    ui.scan = { stage: 'review', photo: await compressImage(file, 500), rows: scanRowsFrom(parsed), mode: 'add', unreadable, dropped };
   } catch (err) {
     console.error(err);
     toast('Could not read the photo: ' + err.message, [], 8000);
@@ -1226,10 +1257,12 @@ function render() {
 // click would replace the button being tapped and swallow the tap).
 let pointerDown = false, pendingRender = false;
 document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
-document.addEventListener('pointerup', () => setTimeout(() => {
+const pointerReleased = () => setTimeout(() => {
   pointerDown = false;
   if (pendingRender) { pendingRender = false; render(); }
-}, 0), true);
+}, 0);
+// a drag ends with dragend/pointercancel instead of pointerup
+['pointerup', 'pointercancel', 'dragend'].forEach(t => document.addEventListener(t, pointerReleased, true));
 function softRender() { if (pointerDown) pendingRender = true; else render(); }
 
 // ---------------- click actions ----------------
@@ -1242,6 +1275,7 @@ const A = {
   newItem: () => itemSheet(null),
   newItemAt: b => itemSheet(null, { location: b.dataset.loc }),
   stockLoc: b => { ui.stockLoc = b.dataset.v; render(); },
+  moveMenu: b => moveSheet(db.get('items', b.dataset.id)),
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
   inc: b => { const it = db.get('items', b.dataset.id); setQty(it, it.qty + 1); },
@@ -1489,6 +1523,38 @@ function bind() {
     if (el.dataset.ci) updateCatDraft(el);
   });
   view.addEventListener('toggle', e => { if (e.target.dataset.toggle === 'gOpen') ui.gDraft.open = e.target.open; }, true);
+  // drag an item row onto another column to move it
+  let dragId = null;
+  view.addEventListener('dragstart', e => {
+    const row = e.target.closest?.('.row.item[draggable]');
+    if (!row) return;
+    dragId = row.dataset.id;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragId);
+    row.classList.add('dragging');
+    view.querySelectorAll('.loc-col').forEach(c => c.classList.add('drop-ready'));
+  });
+  view.addEventListener('dragend', () => {
+    dragId = null;
+    view.querySelectorAll('.dragging, .drop-ready, .drop-over').forEach(el => el.classList.remove('dragging', 'drop-ready', 'drop-over'));
+  });
+  view.addEventListener('dragover', e => {
+    const col = e.target.closest?.('.loc-col');
+    if (!col || !dragId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    view.querySelectorAll('.drop-over').forEach(c => c !== col && c.classList.remove('drop-over'));
+    col.classList.add('drop-over');
+  });
+  view.addEventListener('drop', e => {
+    const col = e.target.closest?.('.loc-col');
+    if (!col || !dragId) return;
+    e.preventDefault();
+    const it = db.get('items', dragId);
+    view.querySelectorAll('.dragging, .drop-ready, .drop-over').forEach(el => el.classList.remove('dragging', 'drop-ready', 'drop-over'));
+    dragId = null;
+    moveItem(it, col.dataset.loc);
+  });
   view.addEventListener('submit', e => {
     e.preventDefault();
     const f = e.target;

@@ -189,6 +189,19 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .warn-days[hidden] { display: none !important; }
 .suggested { margin-top: 1.2rem; padding-top: .2rem; border-top: 1px solid var(--line); }
 
+/* moving items */
+.move-btn { flex: none; width: 34px; height: 34px; border-radius: 9px; border: 1px solid var(--line); background: var(--paper); color: var(--muted); font-size: 1.05rem; cursor: pointer; }
+.move-btn:hover { color: var(--herb); border-color: var(--herb-2); }
+.move-opts { display: grid; gap: .5rem; margin-top: .8rem; }
+.move-opts .btn { justify-content: flex-start; gap: .7rem; }
+.move-opts .btn.here { opacity: .55; }
+.move-opts small { margin-left: auto; font-weight: 500; color: var(--muted); }
+.mo-icon { font-size: 1.4rem; }
+.row.item[draggable] { cursor: grab; }
+.row.item.dragging { opacity: .4; }
+.loc-col.drop-ready { outline: 2px dashed #c9c2b4; outline-offset: -2px; }
+.loc-col.drop-over { outline: 2px dashed var(--herb-2); background: #eef5ef !important; }
+
 /* stock: Fridge / Pantry / Deep freezer */
 .stock-hint { text-align: center; margin: .2rem 0 .8rem; }
 .loc-switch { display: flex; margin: .2rem 0 .7rem; }
@@ -248,6 +261,10 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .scan-row { display: flex; gap: .6rem; padding: .7rem 0; border-top: 1px solid var(--line); }
 .scan-row .two { margin-bottom: .35rem; }
 .scan-row.skipped .grow { opacity: .4; }
+.scan-warn { background: var(--warn-bg); border: 1px solid #f0c9a8; border-radius: 12px; padding: .7rem .8rem; margin: .6rem 0; color: #6b3410; }
+.scan-warn p { margin: .3rem 0 0; font-size: .88rem; }
+.scan-warn .row-end { margin-top: .5rem; }
+.scan-note { background: #fff8ea; border: 1px solid #f0d9ad; border-radius: 10px; padding: .55rem .7rem; font-size: .88rem; }
 .scan-qty-row { display: grid; grid-template-columns: 1fr 64px 76px; gap: .4rem; margin-bottom: .35rem; }
 .scan-qty-row .qty-in { max-width: none; }
 .scan-qty-row .unit-in { padding-left: .5rem; padding-right: .4rem; text-align: center; }
