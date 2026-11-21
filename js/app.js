@@ -1382,7 +1382,7 @@ function askName() {
       const inp = s.querySelector('[data-n]'); inp.focus();
       const ok = () => { S.name = inp.value.trim() || 'Me'; saveSettings(); close(); render(); };
       s.querySelector('[data-ok]').onclick = ok;
-      inp.onkeydown = e => e.key === 'Enter' && ok();
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') ok(); });
     }
   });
 }
