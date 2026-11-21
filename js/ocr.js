@@ -3,32 +3,98 @@
 //  - Claude (vision) — best for handwriting. Needs an Anthropic API key in Settings.
 //  - Tesseract.js   — free, runs in the browser, fine for printed / very neat lists.
 
-const UNITS = 'lbs?|pounds?|oz|ounces?|kgs?|kilos?|g|grams?|l|liters?|litres?|ml|gal|gallons?|qts?|quarts?|dozen|doz|packs?|pkgs?|pk|cans?|bags?|boxes?|bottles?|jars?|loaf|loaves|bunch(?:es)?|heads?|cartons?|tubs?|blocks?|sticks?|cups?';
-const NUM = '(\\d+(?:[.,]\\d+)?|\\d+\\/\\d+|½|¼|¾)';
+// ---------------- quantities ----------------
+// Weights convert between each other; everything else is a "count" unit.
+export const WEIGHTS = { lb: 453.592, oz: 28.3495, g: 1, kg: 1000 };
+const UNIT_ALIASES = {
+  lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb', '#': 'lb',
+  oz: 'oz', ozs: 'oz', ounce: 'oz', ounces: 'oz',
+  g: 'g', gr: 'g', gram: 'g', grams: 'g',
+  kg: 'kg', kgs: 'kg', kilo: 'kg', kilos: 'kg', kilogram: 'kg', kilograms: 'kg',
+  can: 'can', cans: 'can', bag: 'bag', bags: 'bag', box: 'box', boxes: 'box', bottle: 'bottle', bottles: 'bottle',
+  jar: 'jar', jars: 'jar', pack: 'pack', packs: 'pack', pk: 'pack', pkg: 'pack', pkgs: 'pack', package: 'pack', packages: 'pack',
+  carton: 'carton', cartons: 'carton', loaf: 'loaf', loaves: 'loaf', bunch: 'bunch', bunches: 'bunch', head: 'head', heads: 'head',
+  tub: 'tub', tubs: 'tub', block: 'block', blocks: 'block', stick: 'stick', sticks: 'stick',
+  gal: 'gal', gals: 'gal', gallon: 'gal', gallons: 'gal', qt: 'qt', qts: 'qt', quart: 'qt', quarts: 'qt',
+  l: 'L', liter: 'L', liters: 'L', litre: 'L', litres: 'L', ml: 'ml',
+  dozen: 'dozen', doz: 'dozen', dz: 'dozen'
+};
+const UNIT_RE = Object.keys(UNIT_ALIASES).filter(u => u !== '#').sort((a, b) => b.length - a.length).join('|');
+// 1 | 1.5 | 1,5 | 1/4 | 1 1/2 | 1-1/2 | ½ | 1½
+const NUMX = '(?:\\d+(?:\\s+|-)\\d+\\/\\d+|\\d+\\/\\d+|\\d*[½¼¾⅓⅔⅛]|\\d+(?:[.,]\\d+)?)';
+const UNI = { '½': .5, '¼': .25, '¾': .75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': .125 };
 
-function toNum(s) {
-  if (!s) return 1;
-  if (s === '½') return 0.5; if (s === '¼') return 0.25; if (s === '¾') return 0.75;
-  if (s.includes('/')) { const [a, b] = s.split('/').map(Number); return b ? a / b : 1; }
-  return parseFloat(s.replace(',', '.')) || 1;
+// "1 1/2" -> 1.5, "1/4" -> 0.25, "½" -> 0.5, "2,5" -> 2.5
+export function parseAmount(t) {
+  t = String(t ?? '').trim();
+  let m;
+  if ((m = t.match(/^(\d+)(?:\s+|-)(\d+)\/(\d+)$/))) return +m[1] + (+m[3] ? m[2] / m[3] : 0);
+  if ((m = t.match(/^(\d+)\/(\d+)$/))) return +m[2] ? m[1] / m[2] : NaN;
+  if ((m = t.match(/^(\d*)([½¼¾⅓⅔⅛])$/))) return (+m[1] || 0) + UNI[m[2]];
+  const n = parseFloat(t.replace(',', '.'));
+  return isNaN(n) ? NaN : n;
 }
 
-// "3 ground beef", "ground beef x3", "eggs - 12", "2 lb chicken", "milk (2)", "• bread"
+// Turns one list line into { raw, name, qty, unit, count }:
+//   "2 ground beef" / "ground beef 1x" / "x2 milk"  -> qty 2, no unit
+//   "1/4 lb ham" / "ham 1 1/2 lb" / "2# beef"       -> qty 0.25 / 1.5 / 2, unit lb
+//   "12 oz cheddar" / "cheddar (12oz)"              -> qty 12, unit oz
+//   "2x 1 lb ground beef"                            -> qty 2 lb (2 packs of 1 lb), count 2
+//   "3 cans black beans"                             -> qty 3, unit can
+//   "1 dozen eggs"                                   -> qty 12
+// `count` is the number of packages, used when a weight lands on an item counted in packs.
 export function parseLine(raw) {
-  let s = raw.trim()
+  let s = String(raw).trim()
     .replace(/^(\[\s*[x✓✔]?\s*\]|☐|☑|[-–—•*·○◦▪●>]+)\s*/i, '')   // bullets / checkboxes
     .replace(/^\d{1,2}[.)]\s+(?=\D)/, '')                         // "1. " numbered lists
     .trim();
-  if (!s || s.length < 2 || !/[a-z]/i.test(s)) return null;
-  let m;
-  if ((m = s.match(new RegExp(`^${NUM}\\s*(?:x\\s*)?(?:(${UNITS})\\b\\.?)?\\s*(?:of\\s+)?(.+)$`, 'i'))))
-    return { raw, name: clean(m[3]), qty: toNum(m[1]), unit: m[2] || '' };
-  if ((m = s.match(new RegExp(`^(.+?)\\s*(?:[-–:=×]|\\bx|\\(|\\s)\\s*${NUM}\\s*(${UNITS})?\\s*\\)?\\s*$`, 'i'))))
-    return { raw, name: clean(m[1]), qty: toNum(m[2]), unit: m[3] || '' };
-  return { raw, name: clean(s), qty: 1, unit: '' };
+  if (!s || s.length < 2 || !/[a-z]{2}/i.test(s)) return null;
+
+  // 1) multiplier: "2x", "2 x", "x2", "×3", "(2x)"
+  let count = null, m;
+  const mult = new RegExp(`(^|[\\s(])(?:(\\d+)\\s*[x×]|[x×]\\s*(\\d+))(?=$|[\\s),])`, 'i');
+  if ((m = s.match(mult))) {
+    count = +(m[2] || m[3]);
+    s = (s.slice(0, m.index) + m[1] + s.slice(m.index + m[0].length)).trim();
+  }
+
+  // 2) amount (+ unit) at the start or the end: "1 1/2 lb", "12oz", "2#", "1/4", "(3)"
+  let amount = null, unit = '';
+  const unitPart = `(?:\\s*(#|(?:${UNIT_RE})\\b\\.?))?`;
+  // a number must be followed by a unit, a space or a bracket ("7up" is a name, not 7 × "up")
+  const front = new RegExp(`^\\(?(${NUMX})(?:\\s*(#|(?:${UNIT_RE})\\b\\.?)|(?=[\\s)]))\\)?\\s*(?:of\\s+)?`, 'i');
+  const back = new RegExp(`(?:^|[\\s\\-–:=,(])\\(?(${NUMX})${unitPart}\\)?\\s*$`, 'i');
+  if ((m = s.match(front)) && s.slice(m[0].length).match(/[a-z]{2}/i)) {
+    amount = parseAmount(m[1]); unit = m[2] || ''; s = s.slice(m[0].length);
+  } else if ((m = s.match(back)) && s.slice(0, m.index).match(/[a-z]{2}/i)) {
+    amount = parseAmount(m[1]); unit = m[2] || ''; s = s.slice(0, m.index);
+  }
+  // a unit written without a number: "lb ground beef" (rare) — ignore
+  unit = unit ? (UNIT_ALIASES[unit.toLowerCase().replace(/\.$/, '')] || '') : '';
+
+  let qty;
+  if (unit === 'dozen') { qty = (amount || 1) * 12 * (count || 1); unit = ''; }
+  else if (amount != null && !isNaN(amount)) qty = amount * (count || 1);
+  else qty = count || 1;
+  const name = clean(s).replace(/^(?:a\s+)?(?:bags?|box(?:es)?|cans?|jars?|packs?|packages?|bottles?|cartons?|tubs?)\s+of\s+/i, '');
+  if (!name || !/[a-z]{2}/i.test(name)) return null;
+  return { raw: String(raw).trim(), name, qty: Math.round(qty * 1000) / 1000, unit, count: count || (unit && !WEIGHTS[unit] ? qty : 1) };
 }
 
-const clean = s => s.replace(/[\s\-–:,.;]+$/, '').replace(/\s+/g, ' ').trim();
+export const normUnit = u => { u = String(u || '').trim(); return UNIT_ALIASES[u.toLowerCase().replace(/\.$/, '')] || u; };
+
+// How much a scanned line changes an item that is tracked in `itemUnit`.
+//   weight -> weight item: converted (12 oz into an item kept in lb = 0.75)
+//   weight -> item counted in packs: number of packages
+//   otherwise: the number as written
+export function amountFor(row, itemUnit) {
+  const from = row.unit, to = (itemUnit || '').toLowerCase().replace(/s$/, '');
+  if (WEIGHTS[from] && WEIGHTS[to]) return Math.round(row.qty * WEIGHTS[from] / WEIGHTS[to] * 100) / 100;
+  if (WEIGHTS[from] && !WEIGHTS[to]) return row.count || 1;
+  return row.qty;
+}
+
+const clean = s => s.replace(/^[\s\-–:,.;()]+|[\s\-–:,.;(]+$/g, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
 
 export function parseText(text) {
   return text.split(/\r?\n|;/).map(parseLine).filter(Boolean);
@@ -58,10 +124,13 @@ export async function readWithClaude(dataUrl, { apiKey, model, knownNames = [] }
   const [meta, b64] = dataUrl.split(',');
   const media = meta.match(/data:(.*?);/)[1];
   const prompt = `This is a photo of a household food list (often handwritten).
-Read every line item. For each, return the food name, the quantity (a number; default 1 when none is written) and a unit if one is written (lb, oz, can, bag, dozen...).
+Read every line item. For each, return:
+- "name": the item only, without quantities (e.g. "ground beef").
+- "quantity": every quantity written on that line, copied exactly as written, including multipliers, fractions and units. Examples: "1x", "x2", "3", "1/4 lb", "1 1/2 lb", "12 oz", "2x 1 lb", "2#", "3 cans", "1 dozen", "½ gal". Use "" if no quantity is written.
+- "raw": the whole line as written.
 If an item clearly refers to one of these existing household items, use the existing name exactly: ${JSON.stringify(knownNames.slice(0, 300))}
-Ignore titles, dates, crossed-out lines and doodles.
-Respond with ONLY a JSON array like [{"name":"ground beef","qty":2,"unit":"lb","raw":"2 lb grnd beef"}].`;
+Ignore titles, dates, crossed-out lines and doodles. Read handwritten fractions carefully (1/4 vs 1/2 vs 4).
+Respond with ONLY a JSON array like [{"name":"ground beef","quantity":"2x 1 lb","raw":"2x 1lb grnd beef"}].`;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -84,9 +153,14 @@ Respond with ONLY a JSON array like [{"name":"ground beef","qty":2,"unit":"lb","
   const text = out.content?.map(c => c.text || '').join('') || '';
   const json = text.match(/\[[\s\S]*\]/);
   if (!json) throw new Error('Could not read a list from the reply');
-  return JSON.parse(json[0]).map(x => ({
-    raw: x.raw || x.name, name: String(x.name || '').trim(), qty: Number(x.qty) || 1, unit: x.unit || ''
-  })).filter(x => x.name);
+  return JSON.parse(json[0]).map(x => {
+    const name = String(x.name || '').trim();
+    if (!name) return null;
+    const q = String(x.quantity ?? x.qty ?? '').trim();
+    // run the quantity through the same parser as typed lines so the rules match exactly
+    const p = q ? parseLine(`${q} ${name}`) : null;
+    return p && p.name ? { ...p, name, raw: x.raw || `${q} ${name}`.trim() } : { raw: x.raw || name, name, qty: 1, unit: '', count: 1 };
+  }).filter(Boolean);
 }
 
 // ======================================================================

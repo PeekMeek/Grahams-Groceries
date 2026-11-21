@@ -248,6 +248,10 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .scan-row { display: flex; gap: .6rem; padding: .7rem 0; border-top: 1px solid var(--line); }
 .scan-row .two { margin-bottom: .35rem; }
 .scan-row.skipped .grow { opacity: .4; }
+.scan-qty-row { display: grid; grid-template-columns: 1fr 64px 76px; gap: .4rem; margin-bottom: .35rem; }
+.scan-qty-row .qty-in { max-width: none; }
+.scan-qty-row .unit-in { padding-left: .5rem; padding-right: .4rem; text-align: center; }
+.scan-row .conv { font-style: normal; color: var(--herb-2); font-weight: 600; margin-left: .3rem; }
 .scan-row .raw { font-size: .75rem; color: var(--muted); font-style: italic; }
 .scan-row .after { align-self: center; font-size: .9rem; white-space: nowrap; padding: 0 .4rem; }
 

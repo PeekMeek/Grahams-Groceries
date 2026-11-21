@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { DEFAULT_CATEGORIES } from './categories.js';
 import { $, $$, esc, uid, fmtWhen, fmtQty, normalize, bestMatch, compressImage, toast, openSheet, confirmSheet } from './util.js';
-import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract } from './ocr.js';
+import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, parseAmount, normUnit, WEIGHTS } from './ocr.js';
 import * as gh from './github.js';
 
 const LOW = 2; // starred items at or below this quantity go on the grocery list as suggestions
@@ -549,7 +549,7 @@ function viewScan() {
   if (sc.stage === 'pick') return `
     <div class="card">
       <h2>Update stock from a list</h2>
-      <p class="muted">Take a photo of your list — one item per line, with a quantity if you like (“3 ground beef”, “milk x2”, “eggs - 12”). You'll check everything before stock changes.</p>
+      <p class="muted">Take a photo of your list — one item per line, with a quantity if you like: “2x milk”, “ground beef 1x”, “1/4 lb deli ham”, “1 1/2 lb chicken”, “12 oz cheddar”, “3 cans beans”. You'll check everything before stock changes.</p>
       <div class="big-actions">
         <label class="btn primary big">📷 Take photo<input type="file" accept="image/*" capture="environment" hidden data-change="scanFile"></label>
         <label class="btn big">🖼 Choose photo<input type="file" accept="image/*" hidden data-change="scanFile"></label>
@@ -571,22 +571,29 @@ function viewScan() {
   const all = items();
   const rows = sc.rows.map((r, i) => {
     const cur = r.match === 'new' ? null : db.get('items', r.match);
-    const after = !cur ? r.qty : sc.mode === 'add' ? cur.qty + r.qty : sc.mode === 'use' ? Math.max(0, cur.qty - r.qty) : r.qty;
+    const delta = cur ? amountFor(r, cur.unit) : r.qty;
+    const after = !cur ? r.qty : sc.mode === 'add' ? cur.qty + delta : sc.mode === 'use' ? Math.max(0, cur.qty - delta) : delta;
+    const cu = cur ? normUnit(cur.unit) : '';
+    // explain conversions: "12 oz = 0.75 lb", "2 lb → 2 packs"
+    const conv = cur && r.unit && WEIGHTS[r.unit] && cu !== r.unit
+      ? (WEIGHTS[cu] ? `${fmtQty(r.qty)} ${r.unit} = ${fmtQty(delta)} ${cu}` : `counted as ${fmtQty(delta)} ${cur.unit || (delta === 1 ? 'pack' : 'packs')}`)
+      : '';
     return `<div class="scan-row ${r.skip ? 'skipped' : ''}">
       <label class="check"><input type="checkbox" data-scan="skip" data-i="${i}" ${r.skip ? '' : 'checked'}><span></span></label>
       <div class="grow">
-        <div class="two tight">
+        <div class="scan-qty-row">
           <input data-scan="name" data-i="${i}" value="${esc(r.name)}" list="inv-names" aria-label="Name">
-          <input data-scan="qty" data-i="${i}" type="number" step="any" min="0" value="${fmtQty(r.qty)}" aria-label="Quantity" class="qty-in">
+          <input data-scan="qty" data-i="${i}" type="text" inputmode="decimal" value="${fmtQty(r.qty)}" aria-label="Quantity" class="qty-in">
+          <input data-scan="unit" data-i="${i}" value="${esc(r.unit || '')}" placeholder="unit" list="unit-list" aria-label="Unit" class="unit-in" autocomplete="off">
         </div>
         <div class="two tight">
           <select data-scan="match" data-i="${i}" aria-label="Matches">
             <option value="new" ${r.match === 'new' ? 'selected' : ''}>➕ New item</option>
-            ${all.map(it => `<option value="${it.id}" ${r.match === it.id ? 'selected' : ''}>${esc(it.name)} (${fmtQty(it.qty)})</option>`).join('')}
+            ${all.map(it => `<option value="${it.id}" ${r.match === it.id ? 'selected' : ''}>${esc(it.name)} (${fmtQty(it.qty)}${it.unit ? ' ' + esc(it.unit) : ''})</option>`).join('')}
           </select>
-          ${r.match === 'new' ? `<select data-scan="category" data-i="${i}">${catOptions(r.category)}</select>` : `<span class="after">→ <b>${fmtQty(after)}</b></span>`}
+          ${r.match === 'new' ? `<select data-scan="category" data-i="${i}">${catOptions(r.category)}</select>` : `<span class="after">→ <b>${fmtQty(after)}</b> ${esc(cur.unit || '')}</span>`}
         </div>
-        <div class="raw">“${esc(r.raw)}”</div>
+        <div class="raw">“${esc(r.raw)}”${conv ? ` <span class="conv">${esc(conv)}</span>` : ''}</div>
       </div>
     </div>`;
   }).join('');
@@ -603,6 +610,7 @@ function viewScan() {
       </div>
       <div class="scan-rows">${rows || '<p class="muted">No items found — try a clearer photo, or type the list.</p>'}</div>
       <button class="btn ghost small" data-act="scanAddRow">＋ Add a line</button>
+      <datalist id="unit-list">${['lb', 'oz', 'g', 'kg', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton', 'gal', 'L'].map(u => `<option value="${u}">`).join('')}</datalist>
       <div class="row-end">
         <button class="btn ghost" data-act="scanReset">Start over</button>
         <button class="btn primary" data-act="scanApply">Apply ${sc.rows.filter(r => !r.skip).length} items</button>
@@ -643,7 +651,8 @@ async function applyScan() {
     if (r.skip || !r.name.trim()) continue;
     const cur = r.match !== 'new' && db.get('items', r.match);
     if (cur) {
-      const q = sc.mode === 'add' ? cur.qty + r.qty : sc.mode === 'use' ? cur.qty - r.qty : r.qty;
+      const d = amountFor(r, cur.unit);
+      const q = sc.mode === 'add' ? cur.qty + d : sc.mode === 'use' ? cur.qty - d : d;
       await setQty(cur, q); updated++;
     } else {
       if (sc.mode === 'use') continue;
@@ -1252,7 +1261,7 @@ const A = {
   },
   scanMode: b => { ui.scan.mode = b.dataset.v; render(); },
   scanReset: () => { ui.scan = { stage: 'pick' }; render(); },
-  scanAddRow: () => { ui.scan.rows.push({ raw: '(added)', name: '', qty: 1, unit: '', match: 'new', category: 'other', sub: '', skip: false }); render(); },
+  scanAddRow: () => { ui.scan.rows.push({ raw: '(added)', name: '', qty: 1, unit: '', count: 1, match: 'new', category: 'other', sub: '', skip: false }); render(); },
   scanApply: () => applyScan(),
   viewScanPhoto: () => openSheet(`<img class="full-photo" src="${ui.scan.photo}" alt="">`, { wide: true }),
   // grocery
@@ -1447,7 +1456,8 @@ function bind() {
     if (el.dataset.scan) {
       const r = ui.scan.rows[+el.dataset.i], k = el.dataset.scan;
       if (k === 'skip') r.skip = !el.checked;
-      else if (k === 'qty') r.qty = parseFloat(el.value) || 0;
+      else if (k === 'qty') { const v = parseAmount(el.value); r.qty = isNaN(v) ? 0 : v; if (!WEIGHTS[r.unit]) r.count = r.qty; }
+      else if (k === 'unit') { r.unit = normUnit(el.value); if (!WEIGHTS[r.unit]) r.count = r.qty; }
       else if (k === 'name') {
         r.name = el.value;
         const m = bestMatch(r.name, db.list('items'), 0.6);

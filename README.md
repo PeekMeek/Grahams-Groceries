@@ -18,6 +18,8 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 
 **Scan list**
 - Take a photo of a list ("3 ground beef", "milk x2", "eggs - 12", "2 lb chicken"...). The app reads it, matches each line to existing stock, and shows a review screen before changing anything.
+- Quantities it understands: counts ("2x milk", "milk 1x", "x2 bananas", "3 limes"), fractions and mixed numbers ("1/4", "1 1/2", "½"), weights ("1 lb", "12 oz", "2#", "500 g", "1 kg"), package counts ("3 cans", "2 bags", "1 dozen eggs") and combinations ("2x 1 lb ground beef" = 2 lb). The review screen shows the amount and unit for each line. You can edit both, and fractions like 3/4 can be typed in.
+- Weights convert to match how an item is tracked. If an item's unit is lb, "12 oz" adds 0.75 lb. If an item is counted in packs (no unit), a weighed line counts as 1 pack, or 2 for "2x 1 lb". To track something by weight, set its Unit to lb, oz, g or kg.
 - Modes: **Add to stock** (after shopping), **Set counts** (after a pantry count), **Used up**.
 - You can also type or paste a list.
 - Reading engine: with an Anthropic API key in Settings, Claude reads the photo, which handles handwriting well. Without a key, the free built-in reader (Tesseract) is used. It is fine for neat or printed lists and poor at handwriting.
