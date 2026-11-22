@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { DEFAULT_CATEGORIES } from './categories.js';
 import { $, $$, esc, uid, fmtWhen, fmtQty, normalize, bestMatch, compressImage, toast, openSheet, confirmSheet } from './util.js';
-import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, usesFor, parseAmount, normUnit, WEIGHTS } from './ocr.js';
+import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, usesFor, parseAmount, normUnit, WEIGHTS, VOLUMES, isMeasure, convertQty } from './ocr.js';
 import * as gh from './github.js';
 
 const LOW = 2; // default: starred items at or below this quantity are suggested for the grocery list
@@ -168,7 +168,8 @@ const resolveIng = ing => (ing.itemId && db.get('items', ing.itemId)) || findIte
 const sizeOf = it => +it?.size > 0 ? +it.size : 1;
 const unitOf = it => normUnit(it?.unit || '');
 const PLURAL = { box: 'boxes', bunch: 'bunches', loaf: 'loaves', pack: 'packs' };
-const plural = (u, n) => !u || n === 1 || WEIGHTS[u] || ['L', 'ml', 'gal', 'qt'].includes(u) || /s$/.test(u) ? u : (PLURAL[u] || u + 's');
+const NO_PLURAL = ['lb', 'oz', 'g', 'kg', 'L', 'ml', 'gal', 'qt', 'pt', 'tsp', 'tbsp', 'fl oz'];
+const plural = (u, n) => !u || n === 1 || NO_PLURAL.includes(u) || /s$/.test(u) ? u : (PLURAL[u] || u + 's');
 const amt = (n, u) => u ? `${fmtQty(n)} ${plural(u, n)}` : fmtQty(n);
 // total amount in stock, e.g. 5 × 1 lb -> "5 lb", 10 × 12 oz -> "120 oz", 3 cans -> "3 cans"
 const totalText = (it, q = it.qty) => unitOf(it) ? amt(Math.round(q * sizeOf(it) * 100) / 100, unitOf(it)) : fmtQty(q);
@@ -177,7 +178,7 @@ const eachText = it => unitOf(it) ? `${amt(sizeOf(it), unitOf(it))} each` : '';
 const unitSummary = it => !unitOf(it) ? '' : sizeOf(it) === 1 && !WEIGHTS[unitOf(it)] ? totalText(it) : `${eachText(it)} · ${totalText(it)} total`;
 // how many of a stock item one batch of a recipe ingredient uses
 const perBatch = (ing, item) => {
-  const auto = item && !ing.usesManual ? usesFor(ing.amount, item.unit, sizeOf(item)) : null;
+  const auto = item && !ing.usesManual ? usesFor(ing.amount, item.unit, sizeOf(item), densName(item)) : null;
   return auto ?? (+ing.uses > 0 ? +ing.uses : 1);
 };
 
@@ -195,6 +196,8 @@ const SPICE_CUISINES = {
   'vanilla': ['Baking'], 'lemon pepper': ['American'], 'celery salt': ['American'], 'seasoned salt': ['American']
 };
 const isSpice = it => it && (it.sub === 'Spices' || it.category === 'spices');
+// name used to look up a typical density (spices are light and dry)
+const densName = it => `${it?.name || ''}${isSpice(it) ? ' spice' : ''}`;
 function guessCuisines(name) {
   const n = ` ${normalize(name)} `;
   const hit = Object.keys(SPICE_CUISINES).filter(k => n.includes(` ${normalize(k)} `)).sort((a, b) => b.length - a.length)[0];
@@ -271,11 +274,15 @@ async function consume(itemId, packs, label, extra = {}) {
 // units you can enter a use in: "each" (one of the item) plus weights when the item is weighed
 function useUnits(it) {
   const u = unitOf(it), sz = sizeOf(it);
-  const each = u ? (sz === 1 && !WEIGHTS[u] ? plural(u, 2) : `× ${amt(sz, u)}`) : 'each';
-  return [{ v: 'each', label: each }, ...(WEIGHTS[u] ? ['lb', 'oz', 'g', 'kg'].map(w => ({ v: w, label: w })) : [])];
+  const each = u ? (sz === 1 && !isMeasure(u) ? plural(u, 2) : `× ${amt(sz, u)} (whole)`) : 'each';
+  const measures = isMeasure(u) ? [...new Set([u, 'oz', 'lb', 'g', 'tsp', 'tbsp', 'cup', 'fl oz', 'ml', 'L', ...(/butter/i.test(it.name) ? ['stick'] : [])])] : [];
+  return [{ v: 'each', label: each }, ...measures.map(w => ({ v: w, label: w === 'tbsp' ? 'Tbsp' : w }))];
 }
-const toPacks = (it, a, unit) => unit === 'each' || !WEIGHTS[unit] || !WEIGHTS[unitOf(it)]
-  ? a : Math.round(a * WEIGHTS[unit] / WEIGHTS[unitOf(it)] / sizeOf(it) * 1000) / 1000;
+const toPacks = (it, a, unit) => {
+  if (unit === 'each' || !isMeasure(unit) || !isMeasure(unitOf(it))) return a;
+  const c = convertQty(a, unit, unitOf(it), densName(it));
+  return c == null ? a : Math.round(c / sizeOf(it) * 10000) / 10000;
+};
 const useLabel = (it, packs) => unitOf(it) ? totalText(it, packs) : fmtQty(packs);
 
 // ---------------- batch scaling ----------------
@@ -326,7 +333,7 @@ const scaleLabel = k => `${+k.toFixed(2)}× batch`;
 function recipeStatus(r, scale = 1) {
   const rows = (r.ingredients || []).map(ing => {
     const item = resolveIng(ing);
-    const need = Math.round(perBatch(ing, item) * scale * 100) / 100;
+    const need = Math.round(perBatch(ing, item) * scale * 10000) / 10000;
     const ok = ing.optional || (item && availableQty(item) >= need - 1e-9);
     return { ing, item, need, ok };
   });
@@ -337,22 +344,30 @@ const recipesUsing = it => db.list('recipes').filter(r => (r.ingredients || []).
 
 // ---------------- storage locations & time in inventory ----------------
 const LOCS = [
-  { id: 'fridge', name: 'Fridge', icon: '🥛' },
-  { id: 'pantry', name: 'Pantry', icon: '🥫' },
-  { id: 'freezer', name: 'Deep freezer', icon: '❄️' }
+  { id: 'fridge', name: 'Fridge', short: 'Fridge', icon: '🥛' },
+  { id: 'pantry', name: 'Pantry', short: 'Pantry', icon: '🥫' },
+  { id: 'freezer', name: 'Deep freezer', short: 'Freezer', icon: '❄️' },
+  { id: 'stovetop', name: 'Stovetop', short: 'Stovetop', icon: '🍳' }
 ];
 const loc = id => LOCS.find(l => l.id === id) || LOCS[1];
 // Days before an item gets a yellow border (red at double). Shared by the household; editable in Settings.
-const AGE_DEFAULTS = { fridge: 14, pantry: 365, freezer: 180 };
+const AGE_DEFAULTS = { fridge: 14, pantry: 365, freezer: 180, stovetop: 365 };
 const ageDays = () => ({ ...AGE_DEFAULTS, ...(db.get('meta', 'settings')?.ageDays || {}) });
-function defaultLocation(category, sub) {
+// ---- Stovetop: oils, plus salt & pepper and any spice you choose ----
+const isOil = it => /\boil\b|cooking spray/.test(normalize(it?.name || '')) && !isNonFood(it);
+const STOVE_SPICES = /^(kosher |sea |table |black |white |flaky |fine )?(salt|pepper|peppercorn|salt and pepper|salt pepper)$/;
+const isStoveStaple = it => isSpice(it) && STOVE_SPICES.test(normalize(it.name));
+// shown on the stovetop: kept there, or flagged (oils, salt & pepper by default; any spice by choice)
+const onStoveOf = it => locOf(it) === 'stovetop' || (it.onStove ?? (isOil(it) || isStoveStaple(it)));
+function defaultLocation(category, sub, name = '') {
+  if (sub === 'Oils & vinegars' && /\boil\b/i.test(name)) return 'stovetop';
   if (category === 'frozen' || sub === 'Ice cream') return 'freezer';
   if (['meats', 'dairy', 'prepared'].includes(category)) return 'fridge';
   if (category === 'veggies') return ['Onions & garlic', 'Root vegetables'].includes(sub) ? 'pantry' : 'fridge';
   if (category === 'fruit') return sub === 'Berries' ? 'fridge' : 'pantry';
   return 'pantry';
 }
-const locOf = it => LOCS.some(l => l.id === it.location) ? it.location : defaultLocation(it.category, it.sub);
+const locOf = it => LOCS.some(l => l.id === it.location) ? it.location : defaultLocation(it.category, it.sub, it.name);
 const DAY = 86400000;
 const stockedAt = it => it.stockedAt || it.createdAt || it.updatedAt || Date.now();
 const daysIn = it => Math.max(0, Math.floor((Date.now() - stockedAt(it)) / DAY));
@@ -396,7 +411,7 @@ const fmtDays = d => d === 0 ? 'less than a day' : d === 1 ? '1 day' : `${d} day
 const shortDays = d => d < 1 ? 'new' : d < 60 ? `${d}d` : d < 730 ? `${Math.floor(d / 30.4)}mo` : `${Math.floor(d / 365)}y`;
 
 async function setQty(it, qty) {
-  qty = Math.max(0, Math.round(qty * 100) / 100);
+  qty = Math.max(0, Math.round(qty * 10000) / 10000);   // keep precision: 2 oz from a 64 oz jug is 0.03125 of it
   if (it.openedFrom && qty <= 0) { await db.remove('items', it.id); return { ...it, qty: 0 }; }
   const patch = { ...it, qty };
   if (qty > lowAtOf(patch)) patch.lowDismissed = false;
@@ -486,7 +501,7 @@ function grouped(list, rowFn) {
 // ======================================================================
 
 // ---------------- Stock ----------------
-function itemRow(it) {
+function itemRow(it, elsewhere = false) {
   const c = cat(it.category);
   const age = ageState(it), d = daysIn(it);
   const fr = freshness(it);
@@ -496,9 +511,10 @@ function itemRow(it) {
   const copies = isOpenedCopy(it) ? [] : openedCopiesOf(it);
   return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}" draggable="true">
     <button class="star ${it.starred ? 'on' : ''}" data-act="star" data-id="${it.id}" aria-label="Star">★</button>
-    ${thumb(it.photo)}
+    ${it.photo ? thumb(it.photo) : ''}
     <div class="grow">
       <div class="name">${esc(it.name)}${isOpenedCopy(it) ? ' <span class="pill op">opened</span>' : ''}${copies.length ? ` <span class="pill op-count" title="Opened ones are listed separately in the fridge">+${copies.length} open</span>` : ''}</div>
+      ${elsewhere ? `<div class="kept-tag">kept in the ${esc(loc(locOf(it)).name.toLowerCase())}</div>` : ''}
       <div class="meta">${isLeftover(it)
         ? `🍱 Leftovers · made ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric' })}${ageTag}`
         : `${c.icon} ${esc(it.sub || c.name)}${unitSummary(it) ? ' · ' + esc(unitSummary(it)) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}`}</div>
@@ -524,10 +540,18 @@ function viewStock() {
   const shown = ui.stockMode === 'cat' ? applyCatFilter(list, ui.stockCat, ui.stockSub) : list;
   const filtering = q || ui.starredOnly || (ui.stockMode === 'cat' && ui.stockCat);
   const none = !db.list('items').length;
+  const inColumn = (l, list) => l.id === 'stovetop' ? list.filter(onStoveOf) : list.filter(it => locOf(it) === l.id);
   const column = l => {
-    const inLoc = shown.filter(it => locOf(it) === l.id);
-    const body = inLoc.length
-      ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(itemRow).join(''))
+    const inLoc = inColumn(l, shown);
+    let body;
+    if (l.id === 'stovetop') {
+      const oils = inLoc.filter(isOil), spices = inLoc.filter(it => !isOil(it) && isSpice(it)), other = inLoc.filter(it => !isOil(it) && !isSpice(it));
+      const row = it => itemRow(it, locOf(it) !== 'stovetop');
+      body = inLoc.length
+        ? [['🫒 Oils', oils], ['🧂 Spices', spices], ['Other', other]].filter(([, g]) => g.length).map(([h, g]) => `<h3 class="group-h">${h}</h3>${g.map(row).join('')}`).join('')
+        : `<p class="col-empty">${filtering ? 'Nothing matches here.' : 'Oils show up here automatically, plus salt and pepper. Open any spice and tick “Also show on the stovetop”.'}</p>`;
+    } else body = inLoc.length
+      ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(it => itemRow(it)).join(''))
       : `<p class="col-empty">${filtering ? 'Nothing matches here.' : 'Nothing here yet.'}</p>`;
     return `<section class="loc-col ${ui.stockLoc === l.id ? 'on' : ''}" data-loc="${l.id}">
       <header class="loc-h"><span>${l.icon} ${l.name}</span><small>${inLoc.length}</small></header>
@@ -549,7 +573,7 @@ function viewStock() {
     </div>
     ${none ? `<p class="stock-hint muted">Nothing in stock yet. Add items to a column below, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p>` : ''}
     <div class="seg full loc-switch">
-      ${LOCS.map(l => `<button class="${ui.stockLoc === l.id ? 'on' : ''}" data-act="stockLoc" data-v="${l.id}">${l.icon} ${l.name} <small>${shown.filter(it => locOf(it) === l.id).length}</small></button>`).join('')}
+      ${LOCS.map(l => `<button class="${ui.stockLoc === l.id ? 'on' : ''}" data-act="stockLoc" data-v="${l.id}">${l.icon} ${l.short} <small>${inColumn(l, shown).length}</small></button>`).join('')}
     </div>
     <div class="loc-cols">${LOCS.map(column).join('')}</div>
     <button class="fab" data-act="newItemAt" data-loc="${ui.stockLoc}">＋ Add item</button>`;
@@ -609,7 +633,7 @@ function itemSheet(it, prefill = null) {
     ${ageHtml}
     ${!isNew && !isLeftover(it) && it.qty > 0 ? (() => {
       const opts = useUnits(it), u = unitOf(it), sz = sizeOf(it);
-      const defUnit = WEIGHTS[u] ? u : 'each';
+      const defUnit = isMeasure(u) ? u : 'each';
       const chips = (WEIGHTS[u] || sz !== 1 ? [0.25, 0.5, 1] : [1, 2]).filter(p => p <= it.qty + 1e-9);
       return `<div class="use-box">
         <div class="use-head"><b>Used some?</b><span class="small muted">${esc(totalText(it))} in stock</span></div>
@@ -654,12 +678,13 @@ function itemSheet(it, prefill = null) {
         </label>
       </div>
       <p class="total-line" data-total></p>
-      <datalist id="unit-list-item">${['lb', 'oz', 'g', 'kg', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton', 'loaf', 'gal', 'L'].map(u => `<option value="${u}">`).join('')}</datalist>
+      <datalist id="unit-list-item">${['lb', 'oz', 'g', 'kg', 'fl oz', 'cup', 'tbsp', 'tsp', 'L', 'ml', 'gal', 'qt', 'pt', 'stick', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton', 'loaf'].map(u => `<option value="${u}">`).join('')}</datalist>
       <div class="cuisine-field" ${isSpice(it) ? '' : 'hidden'}>
         <div class="field-label">Cuisines</div>
         <div class="cuisine-pick">${[...CUISINES, ...cuisinesOf(it).filter(c => !CUISINES.includes(c))].map(c => `<button type="button" class="chip ${cuisinesOf(it).includes(c) ? 'on' : ''}" data-cuisine="${esc(c)}">${esc(c)}</button>`).join('')}</div>
         <input data-f="cuisineOther" placeholder="Other cuisines (comma separated)" autocomplete="off">
       </div>
+      <label class="check-line stove-line" ${isSpice(it) || isOil(it) ? '' : 'hidden'}><input type="checkbox" data-f="onStove" ${onStoveOf(it) && locOf(it) !== 'stovetop' || it.onStove ? 'checked' : ''}> 🍳 Also show on the stovetop</label>
       <div class="field-label">Kept in</div>
       <div class="seg full loc-pick">${LOCS.map(l => `<button type="button" data-where="${l.id}" class="${where === l.id ? 'on' : ''}">${l.icon} ${l.name}</button>`).join('')}</div>
       <div class="two shelf-life warn-days" ${isNonFood(it) ? 'hidden' : ''}>
@@ -694,7 +719,7 @@ function itemSheet(it, prefill = null) {
         const nf = !!cat(f('category').value).nonFood;
         s.querySelector('.prep-line').hidden = nf;
         s.querySelector('.warn-days').hidden = nf;
-        if (!whereTouched) setWhere(defaultLocation(f('category').value, f('sub').value));
+        if (!whereTouched) setWhere(defaultLocation(f('category').value, f('sub').value, f('name').value));
       };
       s.querySelectorAll('[data-where]').forEach(b => b.onclick = () => { whereTouched = true; setWhere(b.dataset.where); });
       f('category').onchange = () => { f('sub').innerHTML = subOptions(f('category').value, ''); syncPrep(); };
@@ -764,6 +789,7 @@ function itemSheet(it, prefill = null) {
           starred: f('starred').checked, photo,
           lowAt: f('lowAt').value.trim() === '' || isNaN(qtyIn(f('lowAt').value)) ? null : qtyIn(f('lowAt').value),
           location: where,
+          ...(isSpice({ category, sub: f('sub').value }) || isOil({ name, category }) ? { onStove: f('onStove').checked } : {}),
           ...(isSpice({ category, sub: f('sub').value }) ? { cuisines: [...new Set([...cuis, ...f('cuisineOther').value.split(',').map(x => x.trim()).filter(Boolean)])] } : {}),
           warnDays: parseInt(f('warnDays').value) > 0 ? parseInt(f('warnDays').value) : null,
           openedDays: f('openedDays').value.trim() === '' ? null : Math.max(0, parseInt(f('openedDays').value) || 0),
@@ -793,26 +819,34 @@ function itemSheet(it, prefill = null) {
           s.querySelectorAll('[data-cuisine]').forEach(b => b.classList.toggle('on', cuis.includes(b.dataset.cuisine)));
         }
       };
+      const syncStove = () => {
+        const show = isSpice({ category: f('category').value, sub: f('sub').value }) || isOil({ name: f('name').value, category: f('category').value });
+        s.querySelector('.stove-line').hidden = !show;
+        if (show && isNew && it.onStove == null) f('onStove').checked = isOil({ name: f('name').value, category: f('category').value }) || STOVE_SPICES.test(normalize(f('name').value));
+      };
+      ['sub', 'category', 'name'].forEach(k => f(k).addEventListener('change', () => setTimeout(syncStove, 0)));
       f('sub').addEventListener('change', syncSpice);
       f('category').addEventListener('change', syncSpice);
       f('name').addEventListener('change', () => setTimeout(syncSpice, 0));
-      const doUse = async packs => {
+      const doUse = async (packs, typed) => {
         if (!(packs > 0)) return s.querySelector('[data-use-amt]').focus();
         const before = db.get('items', it.id);
         const snap = snapshotFamily(it.id);
         const hadOpen = openedCopiesOf(before).length;
-        await consume(it.id, packs, useLabel(before, packs));
+        const label = typed || useLabel(before, packs);
+        await consume(it.id, packs, label);
         close();
         const after = db.get('items', it.id);
         const opened = !isOpenedCopy(before) && openedDaysOf(before) > 0;
-        toast(`Used ${useLabel(before, packs)} of ${before.name}${opened && !hadOpen ? ' — opened one, now in the fridge' : ''}`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
+        toast(`Used ${label} of ${before.name}${opened && !hadOpen ? ' — opened one, now in the fridge' : ''}`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
         const base = db.get('items', before.openedFrom || before.id);
         if (base && isLow(base) && !groceryFor(base)) setTimeout(() => toast(`${base.name} is running low — suggested on the grocery list`), 400);
         if (after) itemSheet(after);
       };
       s.querySelector('[data-use-go]')?.addEventListener('click', () => {
         const a = parseAmount(s.querySelector('[data-use-amt]').value);
-        doUse(isNaN(a) ? 0 : toPacks(it, a, s.querySelector('[data-use-unit]').value));
+        const un = s.querySelector('[data-use-unit]').value;
+        doUse(isNaN(a) ? 0 : toPacks(it, a, un), isNaN(a) ? '' : un === 'each' ? useLabel(it, a) : `${fmtQty(a)} ${un === 'tbsp' ? 'Tbsp' : un}`);
       });
       s.querySelector('[data-use-amt]')?.addEventListener('keydown', e => { if (e.key === 'Enter') s.querySelector('[data-use-go]').click(); });
       s.querySelectorAll('[data-use-quick]').forEach(b => b.addEventListener('click', () => doUse(+b.dataset.useQuick)));
@@ -947,7 +981,7 @@ function viewScan() {
       </div>
       <div class="scan-rows">${rows || '<p class="muted">No items found — try a clearer photo, or type the list.</p>'}</div>
       <button class="btn ghost small" data-act="scanAddRow">＋ Add a line</button>
-      <datalist id="unit-list">${['lb', 'oz', 'g', 'kg', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton', 'gal', 'L'].map(u => `<option value="${u}">`).join('')}</datalist>
+      <datalist id="unit-list">${['lb', 'oz', 'g', 'kg', 'fl oz', 'cup', 'tbsp', 'tsp', 'L', 'ml', 'gal', 'qt', 'stick', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton'].map(u => `<option value="${u}">`).join('')}</datalist>
       <div class="row-end">
         <button class="btn ghost" data-act="scanReset">Start over</button>
         <button class="btn primary" data-act="scanApply">Apply ${sc.rows.filter(r => !r.skip).length} items</button>
@@ -958,7 +992,7 @@ function viewScan() {
 
 // A scanned line becomes "how many × size of one": "10x 12 oz corn" = 10 × 12 oz, "1/2 lb hazelnuts" = 1 × ½ lb
 function newItemUnits(r) {
-  if (WEIGHTS[r.unit]) { const n = r.count > 0 ? r.count : 1; return { qty: n, size: Math.round(r.qty / n * 1000) / 1000, unit: r.unit }; }
+  if (isMeasure(r.unit)) { const n = r.count > 0 ? r.count : 1; return { qty: n, size: Math.round(r.qty / n * 1000) / 1000, unit: r.unit }; }
   return { qty: r.qty, size: 1, unit: r.unit || '' };
 }
 
@@ -999,7 +1033,7 @@ async function applyScan() {
       await setQty(cur, q); updated++;
     } else {
       if (sc.mode === 'use') continue;
-      await db.put('items', { id: uid(), name: r.name.trim(), ...newItemUnits(r), category: r.category, sub: r.sub || '', location: defaultLocation(r.category, r.sub), starred: false, photo: null, createdAt: Date.now(), stockedAt: Date.now() });
+      await db.put('items', { id: uid(), name: r.name.trim(), ...newItemUnits(r), category: r.category, sub: r.sub || '', location: defaultLocation(r.category, r.sub, r.name), starred: false, photo: null, createdAt: Date.now(), stockedAt: Date.now() });
       added++;
     }
   }
@@ -1113,7 +1147,7 @@ async function toggleDone(g, checked) {
       toast(`Picked up ${g.name}`, [{
         label: 'Add to stock', run: async () => {
           const id = uid();
-          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', location: defaultLocation(g.category, g.sub), createdAt: Date.now(), stockedAt: Date.now(), starred: false, photo: g.photo || null, price: g.price ?? null, priceAt: g.price != null ? Date.now() : null, link: g.link || '' });
+          await db.put('items', { id, name: g.name, qty: g.qty || 1, unit: '', category: g.category, sub: g.sub || '', location: defaultLocation(g.category, g.sub, g.name), createdAt: Date.now(), stockedAt: Date.now(), starred: false, photo: g.photo || null, price: g.price ?? null, priceAt: g.price != null ? Date.now() : null, link: g.link || '' });
           await db.put('grocery', { ...db.get('grocery', g.id), itemId: id });
         }
       }], 7000);
@@ -1194,7 +1228,10 @@ function spiceRow(it) {
       <div class="meta">${cu.length ? cu.map(c => `<span class="tag">${esc(c)}</span>`).join(' ') : '<span class="muted">no cuisine set</span>'}</div>
       <div class="meta">${st.count ? `used ${st.count}×${st.last ? `, last ${fmtWhen(st.last).replace(/ \d+:\d+.*/, '')}` : ''}` : 'not used yet'}${st.recipes ? ` · in ${st.recipes} recipe${st.recipes > 1 ? 's' : ''}` : ''}</div>
     </div>
-    <div class="spice-amt">${it.qty <= 0 ? '<b class="warn">out</b>' : esc(totalText(it))}</div>
+    <div class="spice-side">
+      <div class="spice-amt">${it.qty <= 0 ? '<b class="warn">out</b>' : esc(totalText(it))}</div>
+      <button class="stove-btn ${onStoveOf(it) ? 'on' : ''}" data-act="toggleStove" data-id="${it.id}" title="${onStoveOf(it) ? 'Shown on the stovetop — tap to remove' : 'Show on the stovetop'}">🍳 ${onStoveOf(it) ? 'on stovetop' : 'stovetop?'}</button>
+    </div>
   </div>`;
 }
 
@@ -1298,7 +1335,7 @@ function viewRecipe(id) {
         ${st.rows.map(({ ing, item, need, ok }, i) => `<li class="${ing.optional ? 'opt' : ok ? 'ok' : 'miss'}" data-act="ingInfo" data-id="${r.id}" data-i="${i}">
           <span class="dot"></span>
           <span class="grow"><b ${k !== 1 && ing.amount ? `title="1× batch: ${esc(ing.amount)}"` : ''}>${esc(scaleAmount(ing.amount, k))}</b> ${esc(ing.name)}</span>
-          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${esc(totalText(item, availableQty(item)))}${openedCopiesOf(item).length ? ' (1 open)' : ''} · need ${esc(totalText(item, need))}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
+          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${esc(totalText(item, availableQty(item)))}${openedCopiesOf(item).length ? ' (1 open)' : ''} · need ${esc(!ing.usesManual && usesFor(ing.amount, item.unit, sizeOf(item), densName(item)) != null ? scaleAmount(ing.amount, k) : totalText(item, need))}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
           <span class="chev">›</span>
         </li>`).join('')}
       </ul>
@@ -1487,7 +1524,7 @@ function viewRecipeEdit(id) {
           return `<div class="ing-row">
           <input data-ri="amount" data-i="${i}" value="${esc(g.amount)}" placeholder="1 lb" class="amt">
           <input data-ri="name" data-i="${i}" value="${esc(g.name)}" placeholder="Ingredient" list="inv-names" class="nm">
-          <input data-ri="uses" data-i="${i}" type="text" inputmode="decimal" value="${fmtQty(m && !g.usesManual ? perBatch(g, m) : (g.uses ?? 1))}" class="qty-in uses-in ${m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null ? 'auto' : ''}" aria-label="Uses from stock" title="How many of your stocked item one batch uses (fractions OK)">
+          <input data-ri="uses" data-i="${i}" type="text" inputmode="decimal" value="${fmtQty(m && !g.usesManual ? perBatch(g, m) : (g.uses ?? 1))}" class="qty-in uses-in ${m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m), densName(m)) != null ? 'auto' : ''}" aria-label="Uses from stock" title="How many of your stocked item one batch uses (fractions OK)">
           <label class="mini"><input type="checkbox" data-ri="optional" data-i="${i}" ${g.optional ? 'checked' : ''}>staple</label>
           <button class="icon-btn" data-act="ingDel" data-i="${i}" aria-label="Remove">✕</button>
           ${g.name && !g.optional ? `<div class="link-hint">${esc(ingHint(g))}</div>` : ''}
@@ -1518,7 +1555,7 @@ function viewRecipeEdit(id) {
 function ingHint(g) {
   const m = resolveIng({ name: g.name });
   if (!m) return '↳ not in stock yet';
-  const per = perBatch(g, m), auto = !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null;
+  const per = perBatch(g, m), auto = !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m), densName(m)) != null;
   const each = eachText(m);
   return `↳ stock: ${m.name}${each ? ` (${each})` : ''} · uses ${fmtQty(per)}${unitOf(m) ? ` = ${totalText(m, per)}` : ''}${auto ? ' · auto' : g.usesManual ? ' · set by you (clear the box to go back to auto)' : unitOf(m) ? ' · can’t compare these units, so type it in' : ` · give ${m.name} a size on its stock screen to work this out automatically`}`;
 }
@@ -1738,6 +1775,12 @@ const A = {
   newItemAt: b => itemSheet(null, { location: b.dataset.loc }),
   stockLoc: b => { ui.stockLoc = b.dataset.v; render(); },
   moveMenu: b => moveSheet(db.get('items', b.dataset.id)),
+  toggleStove: b => {
+    const it = db.get('items', b.dataset.id);
+    const on = !onStoveOf(it);
+    db.put('items', { ...it, onStove: on, ...(!on && locOf(it) === 'stovetop' ? { location: 'pantry' } : {}) });
+    toast(on ? `${it.name} shows on the stovetop` : `${it.name} removed from the stovetop`);
+  },
   spiceSort: b => { ui.spiceSort = b.dataset.v; ui.spiceCuisine = null; render(); },
   spiceCuisine: b => { ui.spiceCuisine = b.dataset.v || null; render(); },
   newSpice: () => itemSheet(null, { category: 'pantry', sub: 'Spices', location: 'pantry', qty: 1 }),
@@ -1997,7 +2040,7 @@ function bind() {
       const m = g.name.trim() ? resolveIng({ name: g.name }) : null;
       const usesEl = row.querySelector('[data-ri="uses"]');
       if (m && !g.usesManual) usesEl.value = fmtQty(perBatch(g, m));
-      usesEl.classList.toggle('auto', !!m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null);
+      usesEl.classList.toggle('auto', !!m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m), densName(m)) != null);
       if (g.name.trim() && !g.optional) {
         if (!hint) { hint = document.createElement('div'); hint.className = 'link-hint'; row.appendChild(hint); }
         hint.textContent = ingHint(g);
@@ -2077,6 +2120,11 @@ function askName() {
   render();
   if (!S.name) askName();
   db.setAfterPut(gh.noteLocalChange);
+  // one-time: oils now live on the stovetop (they used to be kept in the pantry)
+  if (!localStorage.getItem('pantry.mig.stoveOils')) {
+    for (const it of db.list('items')) if (isOil(it) && !isOpenedCopy(it) && (!it.location || it.location === 'pantry')) await db.put('items', { ...it, location: 'stovetop' });
+    localStorage.setItem('pantry.mig.stoveOils', '1');
+  }
   gh.onStatus(renderSync);
   $('#refresh-banner button').onclick = async () => {
     try { await gh.pull(); toast('List refreshed'); } catch (e) { toast(e.message, [], 8000); }

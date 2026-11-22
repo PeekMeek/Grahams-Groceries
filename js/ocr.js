@@ -5,7 +5,34 @@
 
 // ---------------- quantities ----------------
 // Weights convert between each other; everything else is a "count" unit.
-export const WEIGHTS = { lb: 453.592, oz: 28.3495, g: 1, kg: 1000 };
+// grams per unit (a butter stick is 4 oz, a half-stick 2 oz)
+export const WEIGHTS = { lb: 453.592, oz: 28.3495, g: 1, kg: 1000, stick: 113.398 };
+// millilitres per unit (US kitchen measures)
+export const VOLUMES = { tsp: 4.92892, tbsp: 14.7868, cup: 236.588, 'fl oz': 29.5735, ml: 1, L: 1000, pt: 473.176, qt: 946.353, gal: 3785.41 };
+export const isMeasure = u => !!(WEIGHTS[u] || VOLUMES[u]);
+// typical density (g per ml) for weight <-> volume; `dry` = sold by weight, so a bare "oz" means weight
+const DENSITY = [['peanut butter', 1.09, 1], ['butter', 0.96, 1], ['oil', 0.92], ['honey', 1.42, 1], ['maple syrup', 1.32], ['syrup', 1.33], ['molasses', 1.4, 1],
+  ['brown sugar', 0.93, 1], ['powdered sugar', 0.56, 1], ['sugar', 0.85, 1], ['flour', 0.53, 1], ['cocoa', 0.42, 1], ['oat', 0.41, 1], ['rice', 0.85, 1],
+  ['salt', 1.2, 1], ['pepper', 0.5, 1], ['spice', 0.5, 1], ['milk', 1.03], ['yogurt', 1.03], ['sour cream', 1.0], ['cream', 1.0],
+  ['shredded cheese', 0.45, 1], ['parmesan', 0.4, 1], ['cheese', 0.45, 1]];
+function densityOf(name = '') {
+  const n = ` ${String(name).toLowerCase()} `;
+  const hit = DENSITY.filter(([k]) => n.includes(k)).sort((a, b) => b[0].length - a[0].length)[0];
+  return hit ? { d: hit[1], dry: !!hit[2] } : { d: 1, dry: false };
+}
+// Convert between any two measures. For liquids a bare "oz" next to a volume is read as fluid
+// ounces (milk jugs, oil bottles); for dry goods it's weight, converted with a typical density.
+export function convertQty(q, from, to, name = '') {
+  if (!from || !to) return null;
+  if (from === to) return q;
+  if (WEIGHTS[from] && WEIGHTS[to]) return q * WEIGHTS[from] / WEIGHTS[to];
+  const { d, dry } = densityOf(name);
+  const f = !dry && from === 'oz' && VOLUMES[to] ? 'fl oz' : from, t = !dry && to === 'oz' && VOLUMES[from] ? 'fl oz' : to;
+  if (VOLUMES[f] && VOLUMES[t]) return q * VOLUMES[f] / VOLUMES[t];
+  if (VOLUMES[f] && WEIGHTS[t]) return q * VOLUMES[f] * d / WEIGHTS[t];
+  if (WEIGHTS[f] && VOLUMES[t]) return q * WEIGHTS[f] / d / VOLUMES[t];
+  return null;
+}
 const UNIT_ALIASES = {
   lb: 'lb', lbs: 'lb', pound: 'lb', pounds: 'lb', '#': 'lb',
   oz: 'oz', ozs: 'oz', ounce: 'oz', ounces: 'oz',
@@ -16,7 +43,11 @@ const UNIT_ALIASES = {
   carton: 'carton', cartons: 'carton', loaf: 'loaf', loaves: 'loaf', bunch: 'bunch', bunches: 'bunch', head: 'head', heads: 'head',
   tub: 'tub', tubs: 'tub', block: 'block', blocks: 'block', stick: 'stick', sticks: 'stick',
   gal: 'gal', gals: 'gal', gallon: 'gal', gallons: 'gal', qt: 'qt', qts: 'qt', quart: 'qt', quarts: 'qt',
-  l: 'L', liter: 'L', liters: 'L', litre: 'L', litres: 'L', ml: 'ml',
+  pt: 'pt', pts: 'pt', pint: 'pt', pints: 'pt',
+  l: 'L', liter: 'L', liters: 'L', litre: 'L', litres: 'L', ml: 'ml', mls: 'ml', milliliter: 'ml', milliliters: 'ml', millilitre: 'ml', millilitres: 'ml',
+  tsp: 'tsp', tsps: 'tsp', teaspoon: 'tsp', teaspoons: 'tsp',
+  tbsp: 'tbsp', tbsps: 'tbsp', tbs: 'tbsp', tbl: 'tbsp', tblsp: 'tbsp', tablespoon: 'tbsp', tablespoons: 'tbsp',
+  cup: 'cup', cups: 'cup', 'fl oz': 'fl oz', 'fl. oz': 'fl oz', floz: 'fl oz', 'fluid ounce': 'fl oz', 'fluid ounces': 'fl oz',
   dozen: 'dozen', doz: 'dozen', dz: 'dozen'
 };
 const UNIT_RE = Object.keys(UNIT_ALIASES).filter(u => u !== '#').sort((a, b) => b.length - a.length).join('|');
@@ -47,7 +78,11 @@ export function parseLine(raw) {
   let s = String(raw).trim()
     .replace(/^(\[\s*[x✓✔]?\s*\]|☐|☑|[-–—•*·○◦▪●>]+)\s*/i, '')   // bullets / checkboxes
     .replace(/^\d{1,2}[.)]\s+(?=\D)/, '')                         // "1. " numbered lists
-    .trim();
+    .trim()
+    // butter shorthand: "2 half-sticks" = 1 stick, "half a stick" / "half-stick" = 0.5 stick, "a stick of" = 1 stick
+    .replace(/(\d+(?:\.\d+)?)\s*half[-\s]?sticks?\b/i, (m, n) => `${n / 2} stick`)
+    .replace(/\bhalf[-\s]+(?:a\s+)?sticks?\b/i, '0.5 stick')
+    .replace(/^an?\s+stick\b/i, '1 stick');
   if (!s || s.length < 2 || !/[a-z]{2}/i.test(s)) return null;
 
   // 1) multiplier: "2x", "2 x", "x2", "×3", "(2x)"
@@ -100,22 +135,22 @@ const r2 = n => Math.round(n * 100) / 100;
 const r4 = n => Math.round(n * 10000) / 10000;
 export function amountFor(row, itemUnit, itemSize = 1) {
   const from = row.unit, to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
-  if (WEIGHTS[from] && WEIGHTS[to]) return r2(row.qty * WEIGHTS[from] / WEIGHTS[to] / size);
-  if (WEIGHTS[from] && !WEIGHTS[to]) return row.count || 1;
+  if (isMeasure(from) && isMeasure(to)) { const c = convertQty(row.qty, from, to, row.name); if (c != null) return r2(c / size); }
+  if (isMeasure(from) && !isMeasure(to)) return row.count || 1;
   if (from && from === to) return r2(row.qty / size);
   return row.qty;
 }
 
-// How many of a stock item a recipe amount uses ("1 lb" of 1 lb packs = 1, "12 oz" of 8 oz blocks = 1.5).
-// null when the units can't be compared (cups, "1 large", no unit) — then the recipe's own "uses" applies.
-export function usesFor(amountText, itemUnit, itemSize = 1) {
+// How many of a stock item a recipe amount uses ("1 lb" of 1 lb packs = 1, "2 Tbsp" of a 1 L bottle = 0.03).
+// null when the units can't be compared ("1 large", no unit, "pinch") — then the recipe's own "uses" applies.
+export function usesFor(amountText, itemUnit, itemSize = 1, name = '') {
   if (!amountText || !itemUnit) return null;
   const p = parseLine(`${amountText} qqitem`);
   if (!p) return null;
   const to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
   // a plain number ("3" eggs) counts items when the stock item is kept in a counting unit (egg, can, bag…)
-  if (!p.unit) return /^\s*[\d½¼¾⅓⅔⅛]/.test(amountText) && to && !WEIGHTS[to] && !['L', 'ml', 'gal', 'qt'].includes(to) ? r4(p.qty / size) : null;
-  if (WEIGHTS[p.unit] && WEIGHTS[to]) return r4(p.qty * WEIGHTS[p.unit] / WEIGHTS[to] / size);
+  if (!p.unit) return /^\s*[\d½¼¾⅓⅔⅛]/.test(amountText) && to && !isMeasure(to) ? r4(p.qty / size) : null;
+  if (isMeasure(p.unit) && isMeasure(to)) { const c = convertQty(p.qty, p.unit, to, name); return c == null ? null : r4(c / size); }
   if (p.unit === to) return r4(p.qty / size);
   return null;
 }

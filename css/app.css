@@ -220,6 +220,14 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .uses-in { max-width: none !important; text-align: center; }
 .uses-in.auto { background: #f1f6f2; border-style: dashed; color: var(--herb); font-style: italic; }
 
+/* stovetop */
+.kept-tag { margin-top: -.05rem; font-size: .68rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.stove-line[hidden] { display: none !important; }
+.spice-side { display: flex; flex-direction: column; align-items: flex-end; gap: .35rem; flex: none; }
+.stove-btn { border: 1px dashed #c9c2b4; background: none; border-radius: 999px; padding: .1rem .5rem; font: inherit; font-size: .72rem; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.stove-btn.on { border-style: solid; border-color: #e8a33d; background: #fff4e0; color: #8a5a0c; font-weight: 700; }
+.loc-switch button { padding-left: .2rem; padding-right: .2rem; font-size: .82rem; }
+
 /* opened copies */
 .pill.op { background: #fde9d0; color: #8a4b0c; font-size: .66rem; vertical-align: middle; }
 .pill.op-count { background: #efe8db; color: #6b5a3a; font-size: .66rem; vertical-align: middle; }
@@ -284,10 +292,10 @@ input.bad { outline: 2px solid #d23f2f; }
 .col-empty { color: var(--muted); text-align: center; padding: 1.2rem 0; font-size: .9rem; }
 .add-here { width: 100%; border-style: dashed; margin-top: .2rem; }
 @media (min-width: 1100px) {
-  #view[data-route=stock] { max-width: 1600px; }
+  #view[data-route=stock] { max-width: 1900px; }
   #view[data-route=stock] .toolbar, #view[data-route=stock] .stock-hint { max-width: 760px; margin-left: auto; margin-right: auto; }
   #view[data-route=stock] .fab, #view .seg.loc-switch { display: none; }
-  .loc-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.2rem; align-items: start; margin-top: .6rem; }
+  .loc-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.2rem; align-items: start; margin-top: .6rem; }
   .loc-col, .loc-col.on { display: block; background: rgba(255,255,255,.5); border: 1px solid var(--line); border-radius: 18px; padding: .8rem; min-height: 260px; }
   .loc-h { display: flex; align-items: baseline; justify-content: space-between; padding: .1rem .3rem .7rem; font-size: 1.2rem; font-weight: 800; letter-spacing: .01em; }
   .loc-h small { font-size: .85rem; color: var(--muted); font-weight: 600; }
