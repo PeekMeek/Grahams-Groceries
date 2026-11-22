@@ -161,7 +161,7 @@ const qtyIn = v => { const n = parseAmount(v); return isNaN(n) ? NaN : Math.max(
 const activeGrocery = () => db.list('grocery').filter(g => !g.done);
 const groceryFor = it => activeGrocery().find(g => g.itemId === it.id || normalize(g.name) === normalize(it.name));
 const suggestions = () => items().filter(it => isLow(it) && !it.lowDismissed && !groceryFor(it));
-const findItem = name => bestMatch(name, db.list('items'), 0.75);
+const findItem = name => bestMatch(name, db.list('items').filter(i => !i.openedFrom), 0.75);
 const resolveIng = ing => (ing.itemId && db.get('items', ing.itemId)) || findItem(ing.name);
 
 // ---------------- units: size of one × how many = total ----------------
@@ -212,14 +212,61 @@ function spiceStats(it) {
 // comparable amount for "most in stock": weights in grams, otherwise the count
 const stockAmount = it => WEIGHTS[unitOf(it)] ? it.qty * sizeOf(it) * WEIGHTS[unitOf(it)] : it.qty;
 
-// ---------------- usage log ----------------
+// ---------------- usage log & opened items ----------------
+// An opened item lives as its own entry in the fridge ("Milk · opened"), linked to the sealed
+// item it came from. The sealed item keeps counting only what's still sealed.
+const isOpenedCopy = it => !!it?.openedFrom;
+const openedCopiesOf = it => it ? db.list('items').filter(x => x.openedFrom === it.id && x.qty > 0).sort((a, b) => (a.openedAt || 0) - (b.openedAt || 0)) : [];
+const availableQty = it => (it?.qty || 0) + openedCopiesOf(it).reduce((a, x) => a + x.qty, 0);
+
+// Split one (or what's left, if less than one) off the sealed item into an opened item in the fridge.
+async function openOne(itemId, days) {
+  const p = db.get('items', itemId);
+  if (!p || p.qty <= 0) return null;
+  const take = Math.min(1, p.qty);
+  const od = days || openedDaysOf(p) || 7;
+  const copy = {
+    id: uid(), name: p.name, category: p.category, sub: p.sub, unit: p.unit || '', size: p.size, price: p.price ?? null, link: p.link || '',
+    photo: p.photo || null, cuisines: p.cuisines, openedDays: od, openedAt: Date.now(), openedFrom: p.id, location: 'fridge',
+    qty: take, starred: false, createdAt: Date.now(), stockedAt: stockedAt(p), usage: []
+  };
+  await db.put('items', copy);
+  await setQty({ ...p, ...(days ? { openedDays: days } : {}) }, p.qty - take);
+  return copy;
+}
+
+// Snapshot a sealed item and its opened copies so any change to them can be undone.
+function snapshotFamily(id) {
+  const it = db.get('items', id);
+  const pid = it?.openedFrom || id;
+  return { pid, items: [db.get('items', pid), ...db.list('items').filter(x => x.openedFrom === pid)].filter(Boolean).map(x => ({ ...x })) };
+}
+async function restoreFamily(snap) {
+  const keep = new Set(snap.items.map(x => x.id));
+  for (const x of db.list('items').filter(x => x.openedFrom === snap.pid && !keep.has(x.id))) await db.remove('items', x.id);
+  for (const x of snap.items) await db.put('items', x);
+}
+
 // Take `packs` (in "how many" terms) out of stock and remember when, who and how much.
-async function logUse(itemId, packs, label, extra = {}) {
-  const cur = db.get('items', itemId);
-  if (!cur) return;
-  const usage = [{ id: uid(), at: Date.now(), by: me(), packs, label, ...extra }, ...(cur.usage || [])].slice(0, 40);
-  const opened = openedDaysOf(cur) > 0 && !cur.openedAt ? { openedAt: Date.now() } : {};   // using some means it's been opened
-  return setQty({ ...cur, usage, ...opened }, cur.qty - packs);
+// Items with an opened shelf life are used from the opened one first; if none is open, one is opened.
+async function consume(itemId, packs, label, extra = {}) {
+  const it = db.get('items', itemId);
+  if (!it) return null;
+  const entry = (p, l) => ({ id: uid(), at: Date.now(), by: me(), packs: p, label: l ?? useLabel(it, p), ...extra });
+  if (isOpenedCopy(it) || openedDaysOf(it) <= 0) {
+    return setQty({ ...it, usage: [entry(packs, label), ...(it.usage || [])].slice(0, 40) }, it.qty - packs);
+  }
+  let left = packs;
+  while (left > 1e-9) {
+    let c = openedCopiesOf(it)[0];                       // oldest opened first
+    if (!c) { c = await openOne(it.id); if (!c) break; } // nothing open: open one
+    const take = Math.min(left, c.qty);
+    await setQty({ ...c, usage: [entry(take), ...(c.usage || [])].slice(0, 40) }, c.qty - take);
+    left = Math.round((left - take) * 1000) / 1000;
+  }
+  const p = db.get('items', it.id);
+  await db.put('items', { ...p, usage: [entry(packs, label), ...(p.usage || [])].slice(0, 40) });
+  return db.get('items', it.id);
 }
 // units you can enter a use in: "each" (one of the item) plus weights when the item is weighed
 function useUnits(it) {
@@ -280,7 +327,7 @@ function recipeStatus(r, scale = 1) {
   const rows = (r.ingredients || []).map(ing => {
     const item = resolveIng(ing);
     const need = Math.round(perBatch(ing, item) * scale * 100) / 100;
-    const ok = ing.optional || (item && item.qty >= need);
+    const ok = ing.optional || (item && availableQty(item) >= need - 1e-9);
     return { ing, item, need, ok };
   });
   const missing = rows.filter(x => !x.ok);
@@ -350,6 +397,7 @@ const shortDays = d => d < 1 ? 'new' : d < 60 ? `${d}d` : d < 730 ? `${Math.floo
 
 async function setQty(it, qty) {
   qty = Math.max(0, Math.round(qty * 100) / 100);
+  if (it.openedFrom && qty <= 0) { await db.remove('items', it.id); return { ...it, qty: 0 }; }
   const patch = { ...it, qty };
   if (qty > lowAtOf(patch)) patch.lowDismissed = false;
   if (!LOCS.some(l => l.id === patch.location)) patch.location = locOf(it);
@@ -444,12 +492,13 @@ function itemRow(it) {
   const fr = freshness(it);
   const ageTag = it.qty <= 0 || isNonFood(it) ? ''
     : fr.opened ? ` · <span class="age ${age}" title="Opened ${fmtDays(fr.days)} ago · good for ${fr.limit} days once opened">🔓 opened ${shortDays(fr.days)}</span>`
-    : ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>${openedDaysOf(it) > 0 ? ` <button class="open-link" data-act="markOpened" data-id="${it.id}" title="Start the ${openedDaysOf(it)}-day opened timer">sealed · open?</button>` : ''}`;
+    : ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>${openedDaysOf(it) > 0 && !isOpenedCopy(it) ? ` <button class="open-link" data-act="markOpened" data-id="${it.id}" title="Open one: it moves to the fridge as its own item with a ${openedDaysOf(it)}-day timer">sealed · open one</button>` : ''}`;
+  const copies = isOpenedCopy(it) ? [] : openedCopiesOf(it);
   return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}" draggable="true">
     <button class="star ${it.starred ? 'on' : ''}" data-act="star" data-id="${it.id}" aria-label="Star">★</button>
     ${thumb(it.photo)}
     <div class="grow">
-      <div class="name">${esc(it.name)}</div>
+      <div class="name">${esc(it.name)}${isOpenedCopy(it) ? ' <span class="pill op">opened</span>' : ''}${copies.length ? ` <span class="pill op-count" title="Opened ones are listed separately in the fridge">+${copies.length} open</span>` : ''}</div>
       <div class="meta">${isLeftover(it)
         ? `🍱 Leftovers · made ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric' })}${ageTag}`
         : `${c.icon} ${esc(it.sub || c.name)}${unitSummary(it) ? ' · ' + esc(unitSummary(it)) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}`}</div>
@@ -506,6 +555,9 @@ function viewStock() {
     <button class="fab" data-act="newItemAt" data-loc="${ui.stockLoc}">＋ Add item</button>`;
 }
 
+const isNewCopyNote = it => isOpenedCopy(it) && db.get('items', it.openedFrom)
+  ? `<p class="small muted copy-note">Opened from your sealed ${esc(it.name)} (${esc(totalText(db.get('items', it.openedFrom)))} still sealed).</p>` : '';
+
 function itemSheet(it, prefill = null) {
   const isNew = !it;
   it = it || { id: uid(), name: '', qty: 1, unit: '', starred: false, category: ui.stockCat || 'other', sub: ui.stockSub && ui.stockSub !== 'Unsorted' ? ui.stockSub : '', photo: null, notes: '' };
@@ -537,7 +589,9 @@ function itemSheet(it, prefill = null) {
     ? `<div class="age-box ${age}">
         <div><b>🔓 Opened <span data-age-days>${fmtDays(fr.days)}</span> ago</b>
           <span class="small muted">opened ${day(it.openedAt)} · ${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'good for'} ${od} days once opened · ${fmtDays(d)} in inventory</span></div>
-        <div class="age-btns"><button type="button" class="btn small ghost" data-opened-new>Opened a new one</button><button type="button" class="btn small ghost" data-unopen>Mark unopened</button></div>
+        <div class="age-btns">${isOpenedCopy(it)
+          ? `<button type="button" class="btn small primary" data-finish-open>✓ Finished it</button>${db.get('items', it.openedFrom) ? '<button type="button" class="btn small ghost" data-put-back>Put back unopened</button>' : ''}`
+          : '<button type="button" class="btn small ghost" data-unopen>Mark unopened</button>'}</div>
       </div>`
     : it.qty <= 0
     ? `<div class="age-box"><b>Out of stock.</b> The time-in-inventory counter restarts when it's restocked.</div>`
@@ -545,7 +599,7 @@ function itemSheet(it, prefill = null) {
         <div><b>In inventory: <span data-age-days>${fmtDays(d)}</span></b>
           <span class="small muted">since ${day(stockedAt(it))}${isNonFood(it) ? '' : ` · ${od > 0 ? 'unopened, ' : ''}${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'warns after'} ${lim} days`}</span></div>
         <div class="age-btns">
-          ${!isNonFood(it) && !isLeftover(it) ? `<button type="button" class="btn small ${od > 0 ? 'primary' : 'ghost'}" data-mark-opened>🔓 Mark opened</button>` : ''}
+          ${!isNonFood(it) && !isLeftover(it) ? `<button type="button" class="btn small ${od > 0 ? 'primary' : 'ghost'}" data-mark-opened>🔓 Open one</button>` : ''}
           <button type="button" class="btn small ghost" data-restock>Restocked today</button>
         </div>
       </div>`;
@@ -570,6 +624,8 @@ function itemSheet(it, prefill = null) {
         </ul></details>` : ''}
       </div>`;
     })() : ''}
+    ${!isNew && !isOpenedCopy(it) && openedCopiesOf(it).length ? `<div class="open-copies">${openedCopiesOf(it).map(c => `<button type="button" class="open-copy" data-open-copy="${c.id}">🔓 ${esc(totalText(c))} opened ${fmtDays(freshness(c).days)} ago · in the ${esc(loc(locOf(c)).name.toLowerCase())} ›</button>`).join('')}</div>` : ''}
+    ${isNewCopyNote(it)}
     ${isLeftover(it) ? `<div class="leftover-box">
       <div>🍱 Leftovers from ${db.get('recipes', it.recipeId) ? `<a href="#/recipe/${it.recipeId}" data-close>${esc(db.get('recipes', it.recipeId).title)}</a>` : 'a recipe'} · <b>${portionLeft(it.qty)}</b></div>
       <button type="button" class="btn small primary" data-uselo>Use ¼ / ½ / finish…</button>
@@ -646,15 +702,26 @@ function itemSheet(it, prefill = null) {
       const reopen = () => { close(); itemSheet(db.get('items', it.id)); };
       s.querySelector('[data-mark-opened]')?.addEventListener('click', async () => {
         const typed = parseInt(f('openedDays').value);
-        const days = typed > 0 ? typed : openedDaysOf(it) || 7;
-        await db.put('items', { ...db.get('items', it.id), openedAt: Date.now(), openedDays: days });
-        toast(`${it.name} opened — good for ${days} days`);
+        const snap = snapshotFamily(it.id);
+        const c = await openOne(it.id, typed > 0 ? typed : null);
+        if (!c) return;
+        toast(`Opened one ${it.name} — it's in the fridge, good for ${c.openedDays} days`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
         reopen();
       });
-      s.querySelector('[data-opened-new]')?.addEventListener('click', async () => {
-        await db.put('items', { ...db.get('items', it.id), openedAt: Date.now() });
-        toast(`Opened a new ${it.name} — timer restarted`);
-        reopen();
+      s.querySelectorAll('[data-open-copy]').forEach(b => b.addEventListener('click', () => { close(); itemSheet(db.get('items', b.dataset.openCopy)); }));
+      s.querySelector('[data-finish-open]')?.addEventListener('click', async () => {
+        const snap = snapshotFamily(it.id);
+        const cur = db.get('items', it.id);
+        if (cur.qty > 0) await consume(cur.id, cur.qty, `the rest (${useLabel(cur, cur.qty)})`);
+        close();
+        toast(`${it.name} finished`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
+      });
+      s.querySelector('[data-put-back]')?.addEventListener('click', async () => {
+        const cur = db.get('items', it.id), p = db.get('items', it.openedFrom);
+        await db.put('items', { ...p, qty: Math.round((p.qty + cur.qty) * 1000) / 1000 });
+        await db.remove('items', cur.id);
+        close();
+        toast(`${it.name} put back as unopened`);
       });
       s.querySelector('[data-unopen]')?.addEventListener('click', async () => {
         await db.put('items', { ...db.get('items', it.id), openedAt: null });
@@ -732,11 +799,16 @@ function itemSheet(it, prefill = null) {
       const doUse = async packs => {
         if (!(packs > 0)) return s.querySelector('[data-use-amt]').focus();
         const before = db.get('items', it.id);
-        const saved = await logUse(it.id, packs, useLabel(before, packs));
+        const snap = snapshotFamily(it.id);
+        const hadOpen = openedCopiesOf(before).length;
+        await consume(it.id, packs, useLabel(before, packs));
         close();
-        toast(`Used ${useLabel(before, packs)} of ${before.name} — ${totalText(saved)} left`, [{ label: 'Undo', run: () => db.put('items', { ...before }) }]);
-        if (isLow(saved) && !groceryFor(saved)) setTimeout(() => toast(`${saved.name} is running low — suggested on the grocery list`), 400);
-        itemSheet(db.get('items', it.id));
+        const after = db.get('items', it.id);
+        const opened = !isOpenedCopy(before) && openedDaysOf(before) > 0;
+        toast(`Used ${useLabel(before, packs)} of ${before.name}${opened && !hadOpen ? ' — opened one, now in the fridge' : ''}`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
+        const base = db.get('items', before.openedFrom || before.id);
+        if (base && isLow(base) && !groceryFor(base)) setTimeout(() => toast(`${base.name} is running low — suggested on the grocery list`), 400);
+        if (after) itemSheet(after);
       };
       s.querySelector('[data-use-go]')?.addEventListener('click', () => {
         const a = parseAmount(s.querySelector('[data-use-amt]').value);
@@ -892,7 +964,7 @@ function newItemUnits(r) {
 
 function scanRowsFrom(parsed) {
   return parsed.map(p => {
-    const m = bestMatch(p.name, db.list('items'), 0.6);
+    const m = bestMatch(p.name, db.list('items').filter(i => !i.openedFrom), 0.6);
     const g = guessCategory(p.name);
     return { ...p, match: m ? m.id : 'new', category: g.category, sub: g.sub, skip: false };
   });
@@ -1226,7 +1298,7 @@ function viewRecipe(id) {
         ${st.rows.map(({ ing, item, need, ok }, i) => `<li class="${ing.optional ? 'opt' : ok ? 'ok' : 'miss'}" data-act="ingInfo" data-id="${r.id}" data-i="${i}">
           <span class="dot"></span>
           <span class="grow"><b ${k !== 1 && ing.amount ? `title="1× batch: ${esc(ing.amount)}"` : ''}>${esc(scaleAmount(ing.amount, k))}</b> ${esc(ing.name)}</span>
-          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${esc(totalText(item))} · need ${esc(totalText(item, need))}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
+          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${esc(totalText(item, availableQty(item)))}${openedCopiesOf(item).length ? ' (1 open)' : ''} · need ${esc(totalText(item, need))}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
           <span class="chev">›</span>
         </li>`).join('')}
       </ul>
@@ -1257,7 +1329,7 @@ function makeRecipeSheet(r) {
     <p class="muted">These will be taken out of stock:</p>
     <div class="deduct">
       ${tracked.map((x, i) => `<label class="check-line"><input type="checkbox" data-i="${i}" checked>
-        ${esc(x.item.name)}: ${esc(totalText(x.item))} → <b>${esc(totalText(x.item, Math.max(0, x.item.qty - x.need)))}</b></label>`).join('') || '<p class="muted">No tracked ingredients are in stock.</p>'}
+        ${esc(x.item.name)}: ${esc(totalText(x.item, availableQty(x.item)))} → <b>${esc(totalText(x.item, Math.max(0, availableQty(x.item) - x.need)))}</b>${openedCopiesOf(x.item).length ? ' <span class="small muted">(opened one used first)</span>' : ''}</label>`).join('') || '<p class="muted">No tracked ingredients are in stock.</p>'}
     </div>
     ${st.missing.length ? `<p class="small warn">Not in stock: ${esc(st.missing.map(m => m.ing.name).join(', '))}</p>` : ''}
     <label class="check-line leftover-opt"><input type="checkbox" data-leftover checked> 🍱 Put the leftovers in the fridge <span class="muted">(shelf life ${leftoverDays()} days)</span></label>
@@ -1270,8 +1342,8 @@ function makeRecipeSheet(r) {
         for (const box of s.querySelectorAll('.deduct input:checked')) {
           const x = tracked[+box.dataset.i];
           const it = db.get('items', x.item.id);
-          undo.push({ ...it });
-          await logUse(it.id, x.need, useLabel(it, x.need), { recipe: r.title });
+          undo.push(snapshotFamily(it.id));
+          await consume(it.id, x.need, useLabel(it, x.need), { recipe: r.title });
         }
         const text = s.querySelector('[data-note]').value.trim();
         let leftoverId = null;
@@ -1291,7 +1363,7 @@ function makeRecipeSheet(r) {
         });
         close();
         toast(leftoverId ? 'Stock updated · leftovers in the fridge' : 'Stock updated', [{ label: 'Undo', run: async () => {
-          for (const prev of undo) await db.put('items', prev);
+          for (const snap of undo) await restoreFamily(snap);
           if (leftoverId) await db.remove('items', leftoverId);
         } }]);
       };
@@ -1407,14 +1479,15 @@ function viewRecipeEdit(id) {
         <label>Time<input data-rd="time" value="${esc(r.time)}" placeholder="30 min"></label>
       </div>
       <h3 class="sec-h">Ingredients</h3>
-      <p class="small muted">“Uses” is how many of the stock item one batch uses up (e.g. 1 pack of ground beef). Tick “staple” for things you don't track, like salt.</p>
+      <p class="small muted"><b>Amount in recipe</b> is what the recipe says. It's what gets shown, printed and scaled. <b>Uses from stock</b> is how many of <i>your</i> stocked item one batch takes. It's worked out for you when the units line up (6 oz from a 64 oz jug = 0.09 of a jug). Otherwise, type it in. Tick <b>staple</b> for things you don't track, like salt.</p>
       <div class="ing-edit">
+        <div class="ing-row ing-head" aria-hidden="true"><span>Amount in recipe</span><span>Ingredient</span><span>Uses from stock</span><span>Untracked</span><span></span></div>
         ${r.ingredients.map((g, i) => {
           const m = g.name ? resolveIng(g) : null;
           return `<div class="ing-row">
           <input data-ri="amount" data-i="${i}" value="${esc(g.amount)}" placeholder="1 lb" class="amt">
           <input data-ri="name" data-i="${i}" value="${esc(g.name)}" placeholder="Ingredient" list="inv-names" class="nm">
-          <input data-ri="uses" data-i="${i}" type="number" min="0" step="any" value="${fmtQty(m && !g.usesManual ? perBatch(g, m) : (g.uses ?? 1))}" class="qty-in" aria-label="Uses from stock" title="How many of the stock item one batch uses">
+          <input data-ri="uses" data-i="${i}" type="text" inputmode="decimal" value="${fmtQty(m && !g.usesManual ? perBatch(g, m) : (g.uses ?? 1))}" class="qty-in uses-in ${m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null ? 'auto' : ''}" aria-label="Uses from stock" title="How many of your stocked item one batch uses (fractions OK)">
           <label class="mini"><input type="checkbox" data-ri="optional" data-i="${i}" ${g.optional ? 'checked' : ''}>staple</label>
           <button class="icon-btn" data-act="ingDel" data-i="${i}" aria-label="Remove">✕</button>
           ${g.name && !g.optional ? `<div class="link-hint">${esc(ingHint(g))}</div>` : ''}
@@ -1447,7 +1520,7 @@ function ingHint(g) {
   if (!m) return '↳ not in stock yet';
   const per = perBatch(g, m), auto = !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null;
   const each = eachText(m);
-  return `↳ stock: ${m.name}${each ? ` (${each})` : ''} · uses ${fmtQty(per)}${unitOf(m) ? ` = ${totalText(m, per)}` : ''}${auto ? ' · worked out from the amount' : g.usesManual ? ' · set by you' : unitOf(m) ? ' · units differ, so set “uses” yourself' : ' · change “uses” if one batch takes more or less'}`;
+  return `↳ stock: ${m.name}${each ? ` (${each})` : ''} · uses ${fmtQty(per)}${unitOf(m) ? ` = ${totalText(m, per)}` : ''}${auto ? ' · auto' : g.usesManual ? ' · set by you (clear the box to go back to auto)' : unitOf(m) ? ' · can’t compare these units, so type it in' : ` · give ${m.name} a size on its stock screen to work this out automatically`}`;
 }
 
 async function saveRecipe() {
@@ -1671,9 +1744,9 @@ const A = {
   useLeftover: b => useLeftoverSheet(db.get('items', b.dataset.id)),
   markOpened: async b => {
     const it = db.get('items', b.dataset.id);
-    const days = openedDaysOf(it) || 7;
-    await db.put('items', { ...it, openedAt: Date.now(), openedDays: it.openedDays ?? days });
-    toast(`${it.name} opened — good for ${days} days`, [{ label: 'Undo', run: () => db.put('items', { ...db.get('items', it.id), openedAt: null }) }]);
+    const snap = snapshotFamily(it.id);
+    const c = await openOne(it.id);
+    if (c) toast(`Opened one ${it.name} — it's in the fridge, good for ${c.openedDays} days`, [{ label: 'Undo', run: () => restoreFamily(snap) }]);
   },
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
@@ -1920,9 +1993,11 @@ function bind() {
       // refresh the "↳ stock:" hint in place (a full re-draw here would swallow the next tap)
       const row = el.closest('.ing-row');
       let hint = row.querySelector('.link-hint');
-      if (el.dataset.ri === 'uses') { g.usesManual = el.value.trim() !== ''; if (g.usesManual) g.uses = +el.value; }
+      if (el.dataset.ri === 'uses') { const v = qtyIn(el.value); g.usesManual = el.value.trim() !== '' && !isNaN(v); if (g.usesManual) g.uses = v; }
       const m = g.name.trim() ? resolveIng({ name: g.name }) : null;
-      if (m && !g.usesManual) row.querySelector('[data-ri="uses"]').value = fmtQty(perBatch(g, m));
+      const usesEl = row.querySelector('[data-ri="uses"]');
+      if (m && !g.usesManual) usesEl.value = fmtQty(perBatch(g, m));
+      usesEl.classList.toggle('auto', !!m && !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null);
       if (g.name.trim() && !g.optional) {
         if (!hint) { hint = document.createElement('div'); hint.className = 'link-hint'; row.appendChild(hint); }
         hint.textContent = ingHint(g);

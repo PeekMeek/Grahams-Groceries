@@ -97,6 +97,7 @@ export const normUnit = u => { u = String(u || '').trim(); return UNIT_ALIASES[u
 //   weight line, item without a weight: number of packages ("2x 1 lb" = 2)
 //   same unit: divided by the size of one; no unit: the number as written
 const r2 = n => Math.round(n * 100) / 100;
+const r4 = n => Math.round(n * 10000) / 10000;
 export function amountFor(row, itemUnit, itemSize = 1) {
   const from = row.unit, to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
   if (WEIGHTS[from] && WEIGHTS[to]) return r2(row.qty * WEIGHTS[from] / WEIGHTS[to] / size);
@@ -110,10 +111,12 @@ export function amountFor(row, itemUnit, itemSize = 1) {
 export function usesFor(amountText, itemUnit, itemSize = 1) {
   if (!amountText || !itemUnit) return null;
   const p = parseLine(`${amountText} qqitem`);
-  if (!p || !p.unit) return null;
+  if (!p) return null;
   const to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
-  if (WEIGHTS[p.unit] && WEIGHTS[to]) return r2(p.qty * WEIGHTS[p.unit] / WEIGHTS[to] / size);
-  if (p.unit === to) return r2(p.qty / size);
+  // a plain number ("3" eggs) counts items when the stock item is kept in a counting unit (egg, can, bag…)
+  if (!p.unit) return /^\s*[\d½¼¾⅓⅔⅛]/.test(amountText) && to && !WEIGHTS[to] && !['L', 'ml', 'gal', 'qt'].includes(to) ? r4(p.qty / size) : null;
+  if (WEIGHTS[p.unit] && WEIGHTS[to]) return r4(p.qty * WEIGHTS[p.unit] / WEIGHTS[to] / size);
+  if (p.unit === to) return r4(p.qty / size);
   return null;
 }
 
