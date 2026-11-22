@@ -6,6 +6,9 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 
 **Stock**
 - Three columns: **Fridge**, **Pantry** and **Deep freezer**. On a phone, a switcher at the top shows one column at a time. Each item's location is set on its screen ("Kept in"). New items get a sensible default: meat and dairy go in the fridge, frozen foods and ice cream in the freezer, dry goods and household goods in the pantry.
+- **Units:** each item has **How many** and **Size of one** (e.g. 1 lb, 12 oz, 1 can). The item screen shows the total (5 × 1 lb = 5 lb), and rows show "1 lb each · 5 lb total". Leave the size empty for things you just count. Scanned lines fill this in: "10x 12 oz steamable corn" becomes 10 × 12 oz, and "2 lb ground beef" added to 1 lb packs adds 2.
+- **Recipes use the units:** when an ingredient's amount has a unit that matches its stock item ("1 lb" of ground beef kept in 1 lb packs, "12 oz" of cheddar kept in 8 oz blocks), the recipe works out how many it uses (1 and 1.5). The recipe page shows "have 3 lb · need 1 lb", and the batch size scales it. When units can't be compared (cups vs. oz, "1 large onion"), set **uses** yourself in the recipe editor.
+- **Used some:** each item's screen has a **Used some?** box for things used outside recipes. Enter an amount in the item's units (e.g. 8 oz) or as a number of items, or tap a quick button (¼, ½, 1). The stock goes down, and **Recent use** keeps a dated log of who used how much. Uses from **Made it** go into the same log with the recipe's name.
 - **Moving items:** tap **⇄** on any row and pick Fridge, Pantry or Deep freezer (with Undo). On a computer you can also drag a row onto another column. The time-in-inventory counter keeps running when you move something.
 - **Time in inventory:** each item counts the days since it was added. The counter restarts when an item is restocked after running out, or when you tap **Restocked today** on the item. Rows show the age (⏱ 5d, 6mo...).
 - **Freshness borders:** a yellow border appears after the warning limit and a red border after double the limit. Defaults: fridge 14 days, pantry 365 days, deep freezer 180 days. Change them in ⚙︎ Settings → Freshness warnings (shared with the household). Any item can have its own limit ("Warn after (days)"). Household goods and items with 0 left don't get borders.
@@ -24,6 +27,12 @@ A Progressive Web App for the household. No build step: plain HTML, CSS and Java
 - Modes: **Add to stock** (after shopping), **Set counts** (after a pantry count), **Used up**.
 - You can also type or paste a list.
 - Reading engine: with an Anthropic API key in Settings, Claude reads the photo, which handles handwriting well. Without a key, the free built-in reader (Tesseract) is used. It is fine for neat or printed lists and poor at handwriting.
+
+**Spices**
+- A tab of everything in Pantry → Spices. Spices are recognised automatically when you add or scan them (cumin, smoked paprika, garam masala, bay leaves...).
+- **Most used:** ranked by how often each spice was used, counting "Used some" entries plus every time a recipe containing it was made. It shows when each was last used.
+- **Cuisine:** grouped by cuisine (Everyday, American, Mexican, Italian, Mediterranean, French, Middle Eastern, Indian, Asian, Baking), with filter chips. Common spices get cuisines automatically. Change them on the spice's screen, where you can also add your own (e.g. Filipino, Tex-Mex).
+- **Most in stock:** sorted by the amount on hand.
 
 **Grocery**
 - Anyone can add an item, with a quantity, photo, category and note. Each item shows who added it and when.

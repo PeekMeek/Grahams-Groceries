@@ -91,11 +91,30 @@ export const normUnit = u => { u = String(u || '').trim(); return UNIT_ALIASES[u
 //   weight -> weight item: converted (12 oz into an item kept in lb = 0.75)
 //   weight -> item counted in packs: number of packages
 //   otherwise: the number as written
-export function amountFor(row, itemUnit) {
-  const from = row.unit, to = (itemUnit || '').toLowerCase().replace(/s$/, '');
-  if (WEIGHTS[from] && WEIGHTS[to]) return Math.round(row.qty * WEIGHTS[from] / WEIGHTS[to] * 100) / 100;
+// How many of a stock item a scanned line adds, given what ONE of that item is
+// (itemSize × itemUnit, e.g. 1 × "lb" or 12 × "oz" or 1 × "can").
+//   weight line, weight item: converted, then divided by the size of one (120 oz into 12 oz bags = 10)
+//   weight line, item without a weight: number of packages ("2x 1 lb" = 2)
+//   same unit: divided by the size of one; no unit: the number as written
+const r2 = n => Math.round(n * 100) / 100;
+export function amountFor(row, itemUnit, itemSize = 1) {
+  const from = row.unit, to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
+  if (WEIGHTS[from] && WEIGHTS[to]) return r2(row.qty * WEIGHTS[from] / WEIGHTS[to] / size);
   if (WEIGHTS[from] && !WEIGHTS[to]) return row.count || 1;
+  if (from && from === to) return r2(row.qty / size);
   return row.qty;
+}
+
+// How many of a stock item a recipe amount uses ("1 lb" of 1 lb packs = 1, "12 oz" of 8 oz blocks = 1.5).
+// null when the units can't be compared (cups, "1 large", no unit) — then the recipe's own "uses" applies.
+export function usesFor(amountText, itemUnit, itemSize = 1) {
+  if (!amountText || !itemUnit) return null;
+  const p = parseLine(`${amountText} qqitem`);
+  if (!p || !p.unit) return null;
+  const to = normUnit(itemUnit), size = +itemSize > 0 ? +itemSize : 1;
+  if (WEIGHTS[p.unit] && WEIGHTS[to]) return r2(p.qty * WEIGHTS[p.unit] / WEIGHTS[to] / size);
+  if (p.unit === to) return r2(p.qty / size);
+  return null;
 }
 
 const clean = s => s.replace(/^[\s\-–:,.;()]+|[\s\-–:,.;(]+$/g, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();

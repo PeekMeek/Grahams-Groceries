@@ -1,7 +1,7 @@
 import * as db from './db.js';
 import { DEFAULT_CATEGORIES } from './categories.js';
 import { $, $$, esc, uid, fmtWhen, fmtQty, normalize, bestMatch, compressImage, toast, openSheet, confirmSheet } from './util.js';
-import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, parseAmount, normUnit, WEIGHTS } from './ocr.js';
+import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, usesFor, parseAmount, normUnit, WEIGHTS } from './ocr.js';
 import * as gh from './github.js';
 
 const LOW = 2; // starred items at or below this quantity go on the grocery list as suggestions
@@ -19,6 +19,7 @@ const ui = {
   gMode: 'all', gCat: null, gSub: null, showDone: false,
   gDraft: { name: '', qty: 1, photo: null, category: '', sub: '', note: '' },
   recipeSearch: '', canMakeOnly: false,
+  spiceSort: 'used', spiceCuisine: null, spiceSearch: '',
   recipeScale: {}, scaleCustom: {}, scaleText: {},
   scan: { stage: 'pick' },
   recipeDraft: null
@@ -65,7 +66,7 @@ const GUESS = [
   ['pantry', 'Pasta & grains', 'pasta spaghetti rice noodle quinoa oat penne macaroni couscous'],
   ['pantry', 'Baking', 'flour sugar yeast baking vanilla cocoa'],
   ['pantry', 'Oils & vinegars', 'oil vinegar'],
-  ['pantry', 'Spices', 'salt cumin paprika cinnamon oregano spice seasoning'],
+  ['pantry', 'Spices', 'salt, kosher salt, sea salt, black pepper, peppercorn, cumin, ground cumin, paprika, smoked paprika, cinnamon, ground cinnamon, oregano, dried oregano, dried basil, dried thyme, dried rosemary, dried dill, dill weed, chili powder, chili flakes, red pepper flakes, crushed red pepper, cayenne, cayenne pepper, garlic powder, onion powder, turmeric, coriander, ground coriander, cardamom, clove, ground clove, nutmeg, ground ginger, allspice, bay leaf, bay leaves, sage, rubbed sage, garam masala, curry powder, five spice, chinese five spice, star anise, italian seasoning, taco seasoning, cajun seasoning, old bay, za\'atar, zaatar, sumac, saffron, fennel seed, mustard seed, cumin seed, sesame seed, celery salt, seasoning salt, seasoned salt, lemon pepper, everything bagel seasoning, spice, seasoning, rub, dry rub'],
   ['pantry', 'Sauces & condiments', 'ketchup mustard mayo mayonnaise sauce salsa dressing soy honey jam peanut'],
   ['pantry', 'Canned goods', 'can canned soup broth stock'],
   ['pantry', 'Beans & lentils', 'lentil chickpea bean beans kidney'],
@@ -157,6 +158,72 @@ const suggestions = () => items().filter(it => isLow(it) && !it.lowDismissed && 
 const findItem = name => bestMatch(name, db.list('items'), 0.75);
 const resolveIng = ing => (ing.itemId && db.get('items', ing.itemId)) || findItem(ing.name);
 
+// ---------------- units: size of one × how many = total ----------------
+const sizeOf = it => +it?.size > 0 ? +it.size : 1;
+const unitOf = it => normUnit(it?.unit || '');
+const PLURAL = { box: 'boxes', bunch: 'bunches', loaf: 'loaves', pack: 'packs' };
+const plural = (u, n) => !u || n === 1 || WEIGHTS[u] || ['L', 'ml', 'gal', 'qt'].includes(u) || /s$/.test(u) ? u : (PLURAL[u] || u + 's');
+const amt = (n, u) => u ? `${fmtQty(n)} ${plural(u, n)}` : fmtQty(n);
+// total amount in stock, e.g. 5 × 1 lb -> "5 lb", 10 × 12 oz -> "120 oz", 3 cans -> "3 cans"
+const totalText = (it, q = it.qty) => unitOf(it) ? amt(Math.round(q * sizeOf(it) * 100) / 100, unitOf(it)) : fmtQty(q);
+const eachText = it => unitOf(it) ? `${amt(sizeOf(it), unitOf(it))} each` : '';
+// "1 lb each · 5 lb total", or just "3 cans" when one is simply 1 of the unit
+const unitSummary = it => !unitOf(it) ? '' : sizeOf(it) === 1 && !WEIGHTS[unitOf(it)] ? totalText(it) : `${eachText(it)} · ${totalText(it)} total`;
+// how many of a stock item one batch of a recipe ingredient uses
+const perBatch = (ing, item) => {
+  const auto = item && !ing.usesManual ? usesFor(ing.amount, item.unit, sizeOf(item)) : null;
+  return auto ?? (+ing.uses > 0 ? +ing.uses : 1);
+};
+
+// ---------------- spices ----------------
+const CUISINES = ['Everyday', 'American', 'Mexican', 'Italian', 'Mediterranean', 'French', 'Middle Eastern', 'Indian', 'Asian', 'Baking'];
+const SPICE_CUISINES = {
+  'salt': ['Everyday'], 'black pepper': ['Everyday'], 'peppercorn': ['Everyday'], 'garlic powder': ['Everyday', 'American'], 'onion powder': ['American'],
+  'cumin': ['Mexican', 'Indian', 'Middle Eastern'], 'chili powder': ['Mexican', 'American'], 'paprika': ['American', 'Mediterranean'], 'smoked paprika': ['American', 'Mediterranean'],
+  'oregano': ['Italian', 'Mexican', 'Mediterranean'], 'basil': ['Italian'], 'thyme': ['French', 'Mediterranean'], 'rosemary': ['Italian', 'Mediterranean'], 'dill': ['Mediterranean'],
+  'turmeric': ['Indian', 'Middle Eastern'], 'coriander': ['Indian', 'Mexican', 'Middle Eastern'], 'garam masala': ['Indian'], 'curry powder': ['Indian'], 'cardamom': ['Indian', 'Middle Eastern', 'Baking'],
+  'cinnamon': ['Baking', 'Middle Eastern', 'Mexican', 'Indian'], 'nutmeg': ['Baking'], 'allspice': ['Baking'], 'clove': ['Baking', 'Indian'], 'ginger': ['Asian', 'Indian', 'Baking'],
+  'five spice': ['Asian'], 'star anise': ['Asian'], 'sesame seed': ['Asian'], 'cayenne': ['American', 'Mexican'], 'red pepper flake': ['Italian'], 'crushed red pepper': ['Italian'], 'chili flake': ['Italian', 'Asian'],
+  'italian seasoning': ['Italian'], 'taco seasoning': ['Mexican'], 'cajun seasoning': ['American'], 'old bay': ['American'], 'za atar': ['Middle Eastern'], 'zaatar': ['Middle Eastern'], 'sumac': ['Middle Eastern'],
+  'saffron': ['Indian', 'Mediterranean', 'Middle Eastern'], 'bay leaf': ['Mediterranean', 'French', 'Indian'], 'bay leaves': ['Mediterranean', 'French', 'Indian'], 'fennel seed': ['Italian', 'Indian'], 'mustard seed': ['Indian'], 'sage': ['American', 'Italian'],
+  'vanilla': ['Baking'], 'lemon pepper': ['American'], 'celery salt': ['American'], 'seasoned salt': ['American']
+};
+const isSpice = it => it && (it.sub === 'Spices' || it.category === 'spices');
+function guessCuisines(name) {
+  const n = ` ${normalize(name)} `;
+  const hit = Object.keys(SPICE_CUISINES).filter(k => n.includes(` ${normalize(k)} `)).sort((a, b) => b.length - a.length)[0];
+  return hit ? SPICE_CUISINES[hit] : [];
+}
+const cuisinesOf = it => Array.isArray(it.cuisines) ? it.cuisines : guessCuisines(it.name);
+// times used: "Used some" entries + every time a recipe containing it was made
+function spiceStats(it) {
+  const own = (it.usage || []).filter(u => !u.recipe);
+  const recs = recipesUsing(it);
+  const count = own.length + recs.reduce((a, r) => a + (r.madeCount || 0), 0);
+  const last = Math.max(0, ...own.map(u => u.at), ...recs.map(r => r.lastMade || 0));
+  return { count, last, recipes: recs.length };
+}
+// comparable amount for "most in stock": weights in grams, otherwise the count
+const stockAmount = it => WEIGHTS[unitOf(it)] ? it.qty * sizeOf(it) * WEIGHTS[unitOf(it)] : it.qty;
+
+// ---------------- usage log ----------------
+// Take `packs` (in "how many" terms) out of stock and remember when, who and how much.
+async function logUse(itemId, packs, label, extra = {}) {
+  const cur = db.get('items', itemId);
+  if (!cur) return;
+  const usage = [{ id: uid(), at: Date.now(), by: me(), packs, label, ...extra }, ...(cur.usage || [])].slice(0, 40);
+  return setQty({ ...cur, usage }, cur.qty - packs);
+}
+// units you can enter a use in: "each" (one of the item) plus weights when the item is weighed
+function useUnits(it) {
+  const u = unitOf(it), sz = sizeOf(it);
+  const each = u ? (sz === 1 && !WEIGHTS[u] ? plural(u, 2) : `× ${amt(sz, u)}`) : 'each';
+  return [{ v: 'each', label: each }, ...(WEIGHTS[u] ? ['lb', 'oz', 'g', 'kg'].map(w => ({ v: w, label: w })) : [])];
+}
+const toPacks = (it, a, unit) => unit === 'each' || !WEIGHTS[unit] || !WEIGHTS[unitOf(it)]
+  ? a : Math.round(a * WEIGHTS[unit] / WEIGHTS[unitOf(it)] / sizeOf(it) * 1000) / 1000;
+const useLabel = (it, packs) => unitOf(it) ? totalText(it, packs) : fmtQty(packs);
+
 // ---------------- batch scaling ----------------
 const SCALES = [0.5, 1, 1.5, 2];
 const UNI = { '½': .5, '¼': .25, '¾': .75, '⅓': 1 / 3, '⅔': 2 / 3, '⅛': .125, '⅜': .375, '⅝': .625, '⅞': .875 };
@@ -205,7 +272,7 @@ const scaleLabel = k => `${+k.toFixed(2)}× batch`;
 function recipeStatus(r, scale = 1) {
   const rows = (r.ingredients || []).map(ing => {
     const item = resolveIng(ing);
-    const need = Math.round((+ing.uses || 1) * scale * 100) / 100;
+    const need = Math.round(perBatch(ing, item) * scale * 100) / 100;
     const ok = ing.optional || (item && item.qty >= need);
     return { ing, item, need, ok };
   });
@@ -350,7 +417,7 @@ function itemRow(it) {
       <div class="name">${esc(it.name)}</div>
       <div class="meta">${isLeftover(it)
         ? `🍱 Leftovers · made ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric' })}${ageTag}`
-        : `${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}`}</div>
+        : `${c.icon} ${esc(it.sub || c.name)}${unitSummary(it) ? ' · ' + esc(unitSummary(it)) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}`}</div>
     </div>
     <button class="move-btn" data-act="moveMenu" data-id="${it.id}" aria-label="Move to fridge, pantry or freezer" title="Move">⇄</button>
     ${isLeftover(it) ? `<div class="portion">
@@ -441,6 +508,23 @@ function itemSheet(it, prefill = null) {
   openSheet(`
     <h2>${isNew ? 'Add item' : esc(it.name)}</h2>
     ${ageHtml}
+    ${!isNew && !isLeftover(it) && it.qty > 0 ? (() => {
+      const opts = useUnits(it), u = unitOf(it), sz = sizeOf(it);
+      const defUnit = WEIGHTS[u] ? u : 'each';
+      const chips = (WEIGHTS[u] || sz !== 1 ? [0.25, 0.5, 1] : [1, 2]).filter(p => p <= it.qty + 1e-9);
+      return `<div class="use-box">
+        <div class="use-head"><b>Used some?</b><span class="small muted">${esc(totalText(it))} in stock</span></div>
+        <div class="use-row">
+          <input data-use-amt type="text" inputmode="decimal" placeholder="${WEIGHTS[u] ? fmtQty(sz) : '1'}" aria-label="Amount used">
+          <select data-use-unit aria-label="Unit">${opts.map(o => `<option value="${o.v}" ${o.v === defUnit ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+          <button type="button" class="btn primary small" data-use-go>Mark used</button>
+        </div>
+        ${chips.length ? `<div class="use-chips">${chips.map(p => `<button type="button" class="chip" data-use-quick="${p}">${p === 1 ? (u ? `1 (${esc(amt(sz, u))})` : '1') : `${niceQty(p)}${u ? ` (${esc(useLabel(it, p))})` : ''}`}</button>`).join('')}</div>` : ''}
+        ${(it.usage || []).length ? `<details class="use-log"><summary>Recent use (${it.usage.length})</summary><ul>
+          ${it.usage.slice(0, 10).map(e => `<li><span>${fmtWhen(e.at)}</span> ${esc(e.by || '?')} used <b>${esc(e.label)}</b>${e.recipe ? ` for ${esc(e.recipe)}` : ''}</li>`).join('')}
+        </ul></details>` : ''}
+      </div>`;
+    })() : ''}
     ${isLeftover(it) ? `<div class="leftover-box">
       <div>🍱 Leftovers from ${db.get('recipes', it.recipeId) ? `<a href="#/recipe/${it.recipeId}" data-close>${esc(db.get('recipes', it.recipeId).title)}</a>` : 'a recipe'} · <b>${portionLeft(it.qty)}</b></div>
       <button type="button" class="btn small primary" data-uselo>Use ¼ / ½ / finish…</button>
@@ -456,8 +540,20 @@ function itemSheet(it, prefill = null) {
         <label>Type<select data-f="sub">${subOptions(it.category, it.sub)}</select></label>
       </div>
       <div class="two">
-        <label>Quantity<input data-f="qty" type="number" step="any" min="0" value="${fmtQty(it.qty)}"></label>
-        <label>Unit (optional)<input data-f="unit" value="${esc(it.unit || '')}" placeholder="pack, lb, can…"></label>
+        <label>How many<input data-f="qty" type="number" step="any" min="0" value="${fmtQty(it.qty)}"></label>
+        <label>Size of one <span class="opt-tag">(optional)</span>
+          <span class="size-in">
+            <input data-f="size" type="text" inputmode="decimal" value="${it.unit ? fmtQty(sizeOf(it)) : ''}" placeholder="1" aria-label="Amount in one">
+            <input data-f="unit" value="${esc(it.unit || '')}" placeholder="lb, oz, can…" list="unit-list-item" autocomplete="off" aria-label="Unit">
+          </span>
+        </label>
+      </div>
+      <p class="total-line" data-total></p>
+      <datalist id="unit-list-item">${['lb', 'oz', 'g', 'kg', 'can', 'bag', 'box', 'pack', 'bottle', 'jar', 'carton', 'loaf', 'gal', 'L'].map(u => `<option value="${u}">`).join('')}</datalist>
+      <div class="cuisine-field" ${isSpice(it) ? '' : 'hidden'}>
+        <div class="field-label">Cuisines</div>
+        <div class="cuisine-pick">${[...CUISINES, ...cuisinesOf(it).filter(c => !CUISINES.includes(c))].map(c => `<button type="button" class="chip ${cuisinesOf(it).includes(c) ? 'on' : ''}" data-cuisine="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+        <input data-f="cuisineOther" placeholder="Other cuisines (comma separated)" autocomplete="off">
       </div>
       <div class="field-label">Kept in</div>
       <div class="seg full loc-pick">${LOCS.map(l => `<button type="button" data-where="${l.id}" class="${where === l.id ? 'on' : ''}">${l.icon} ${l.name}</button>`).join('')}</div>
@@ -520,11 +616,13 @@ function itemSheet(it, prefill = null) {
         const prepared = f('prepared').checked;
         const price = parsePrice(f('price').value);
         await setQty({
-          ...it, name, category, sub: f('sub').value, unit: f('unit').value.trim(), notes: f('notes').value.trim(),
+          ...it, name, category, sub: f('sub').value, notes: f('notes').value.trim(),
+          unit: normUnit(f('unit').value), size: normUnit(f('unit').value) && parseAmount(f('size').value) > 0 ? parseAmount(f('size').value) : 1,
           price, priceAt: price === (it.price ?? null) ? it.priceAt : (price == null ? null : Date.now()),
           link: cleanLink(f('link').value),
           starred: f('starred').checked, photo,
           location: where,
+          ...(isSpice({ category, sub: f('sub').value }) ? { cuisines: [...new Set([...cuis, ...f('cuisineOther').value.split(',').map(x => x.trim()).filter(Boolean)])] } : {}),
           warnDays: parseInt(f('warnDays').value) > 0 ? parseInt(f('warnDays').value) : null,
           ...(restockedAt ? { stockedAt: restockedAt } : {}),
           prepared: cat(category).nonFood || prepared === !!cat(category).prepared ? undefined : prepared
@@ -537,6 +635,48 @@ function itemSheet(it, prefill = null) {
           await db.remove('items', it.id); close();
         }
       });
+      // cuisines (spices only)
+      let cuis = [...cuisinesOf(it)];
+      s.querySelectorAll('[data-cuisine]').forEach(b => b.onclick = () => {
+        const c = b.dataset.cuisine;
+        cuis = cuis.includes(c) ? cuis.filter(x => x !== c) : [...cuis, c];
+        b.classList.toggle('on', cuis.includes(c));
+      });
+      const syncSpice = () => {
+        const sp = isSpice({ category: f('category').value, sub: f('sub').value });
+        s.querySelector('.cuisine-field').hidden = !sp;
+        if (sp && !cuis.length && isNew) {
+          cuis = guessCuisines(f('name').value);
+          s.querySelectorAll('[data-cuisine]').forEach(b => b.classList.toggle('on', cuis.includes(b.dataset.cuisine)));
+        }
+      };
+      f('sub').addEventListener('change', syncSpice);
+      f('category').addEventListener('change', syncSpice);
+      f('name').addEventListener('change', () => setTimeout(syncSpice, 0));
+      const doUse = async packs => {
+        if (!(packs > 0)) return s.querySelector('[data-use-amt]').focus();
+        const before = db.get('items', it.id);
+        const saved = await logUse(it.id, packs, useLabel(before, packs));
+        close();
+        toast(`Used ${useLabel(before, packs)} of ${before.name} — ${totalText(saved)} left`, [{ label: 'Undo', run: () => db.put('items', { ...before }) }]);
+        if (isLow(saved) && !groceryFor(saved)) setTimeout(() => toast(`${saved.name} is running low — suggested on the grocery list`), 400);
+        itemSheet(db.get('items', it.id));
+      };
+      s.querySelector('[data-use-go]')?.addEventListener('click', () => {
+        const a = parseAmount(s.querySelector('[data-use-amt]').value);
+        doUse(isNaN(a) ? 0 : toPacks(it, a, s.querySelector('[data-use-unit]').value));
+      });
+      s.querySelector('[data-use-amt]')?.addEventListener('keydown', e => { if (e.key === 'Enter') s.querySelector('[data-use-go]').click(); });
+      s.querySelectorAll('[data-use-quick]').forEach(b => b.addEventListener('click', () => doUse(+b.dataset.useQuick)));
+      const showTotal = () => {
+        const q = parseFloat(f('qty').value) || 0, u = normUnit(f('unit').value), sz = parseAmount(f('size').value);
+        const one = sz > 0 ? sz : 1;
+        s.querySelector('[data-total]').innerHTML = u
+          ? `Total: <b>${fmtQty(q)}</b> × ${esc(amt(one, u))} = <b>${esc(amt(Math.round(q * one * 100) / 100, u))}</b>`
+          : `<span class="muted">Add a size (e.g. 1 lb, 12 oz, 1 can) to see the total amount.</span>`;
+      };
+      ['qty', 'size', 'unit'].forEach(k => f(k).addEventListener('input', showTotal));
+      showTotal();
       s.querySelector('[data-uselo]')?.addEventListener('click', () => { close(); useLeftoverSheet(db.get('items', it.id)); });
       s.querySelector('[data-toss]')?.addEventListener('click', () => { close(); finishLeftover(db.get('items', it.id), 'toss'); });
       s.querySelector('[data-tolist]')?.addEventListener('click', async () => {
@@ -613,13 +753,12 @@ function viewScan() {
   const all = items();
   const rows = sc.rows.map((r, i) => {
     const cur = r.match === 'new' ? null : db.get('items', r.match);
-    const delta = cur ? amountFor(r, cur.unit) : r.qty;
+    const delta = cur ? amountFor(r, cur.unit, sizeOf(cur)) : r.qty;
     const after = !cur ? r.qty : sc.mode === 'add' ? cur.qty + delta : sc.mode === 'use' ? Math.max(0, cur.qty - delta) : delta;
-    const cu = cur ? normUnit(cur.unit) : '';
-    // explain conversions: "12 oz = 0.75 lb", "2 lb → 2 packs"
-    const conv = cur && r.unit && WEIGHTS[r.unit] && cu !== r.unit
-      ? (WEIGHTS[cu] ? `${fmtQty(r.qty)} ${r.unit} = ${fmtQty(delta)} ${cu}` : `counted as ${fmtQty(delta)} ${cur.unit || (delta === 1 ? 'pack' : 'packs')}`)
-      : '';
+    // explain units: "120 oz = 10 × 12 oz", "2 lb → 2 (no size set)", "new: 10 × 12 oz"
+    const nw = newItemUnits(r);
+    const conv = !cur ? (nw.unit ? `new: ${fmtQty(nw.qty)} × ${amt(nw.size, nw.unit)}` : '')
+      : r.unit ? (unitOf(cur) ? `${amt(r.qty, r.unit)} = ${fmtQty(delta)} × ${amt(sizeOf(cur), unitOf(cur))}` : `counted as ${fmtQty(delta)}`) : '';
     return `<div class="scan-row ${r.skip ? 'skipped' : ''}">
       <label class="check"><input type="checkbox" data-scan="skip" data-i="${i}" ${r.skip ? '' : 'checked'}><span></span></label>
       <div class="grow">
@@ -633,7 +772,7 @@ function viewScan() {
             <option value="new" ${r.match === 'new' ? 'selected' : ''}>➕ New item</option>
             ${all.map(it => `<option value="${it.id}" ${r.match === it.id ? 'selected' : ''}>${esc(it.name)} (${fmtQty(it.qty)}${it.unit ? ' ' + esc(it.unit) : ''})</option>`).join('')}
           </select>
-          ${r.match === 'new' ? `<select data-scan="category" data-i="${i}">${catOptions(r.category)}</select>` : `<span class="after">→ <b>${fmtQty(after)}</b> ${esc(cur.unit || '')}</span>`}
+          ${r.match === 'new' ? `<select data-scan="category" data-i="${i}">${catOptions(r.category)}</select>` : `<span class="after">→ <b>${fmtQty(after)}</b>${unitOf(cur) ? ` <small>(${esc(totalText(cur, after))})</small>` : ''}</span>`}
         </div>
         <div class="raw">“${esc(r.raw)}”${conv ? ` <span class="conv">${esc(conv)}</span>` : ''}</div>
       </div>
@@ -664,6 +803,12 @@ function viewScan() {
       </div>
     </div>
     ${invDatalist()}`;
+}
+
+// A scanned line becomes "how many × size of one": "10x 12 oz corn" = 10 × 12 oz, "1/2 lb hazelnuts" = 1 × ½ lb
+function newItemUnits(r) {
+  if (WEIGHTS[r.unit]) { const n = r.count > 0 ? r.count : 1; return { qty: n, size: Math.round(r.qty / n * 1000) / 1000, unit: r.unit }; }
+  return { qty: r.qty, size: 1, unit: r.unit || '' };
 }
 
 function scanRowsFrom(parsed) {
@@ -698,12 +843,12 @@ async function applyScan() {
     if (r.skip || !r.name.trim()) continue;
     const cur = r.match !== 'new' && db.get('items', r.match);
     if (cur) {
-      const d = amountFor(r, cur.unit);
+      const d = amountFor(r, cur.unit, sizeOf(cur));
       const q = sc.mode === 'add' ? cur.qty + d : sc.mode === 'use' ? cur.qty - d : d;
       await setQty(cur, q); updated++;
     } else {
       if (sc.mode === 'use') continue;
-      await db.put('items', { id: uid(), name: r.name.trim(), qty: r.qty, unit: r.unit || '', category: r.category, sub: r.sub || '', location: defaultLocation(r.category, r.sub), starred: false, photo: null, createdAt: Date.now(), stockedAt: Date.now() });
+      await db.put('items', { id: uid(), name: r.name.trim(), ...newItemUnits(r), category: r.category, sub: r.sub || '', location: defaultLocation(r.category, r.sub), starred: false, photo: null, createdAt: Date.now(), stockedAt: Date.now() });
       added++;
     }
   }
@@ -886,6 +1031,56 @@ async function addMissing(r, scale = 1) {
   toast(n ? `Added ${n} item${n > 1 ? 's' : ''} to the grocery list` : 'Everything missing is already on the list');
 }
 
+// ---------------- Spices ----------------
+function spiceRow(it) {
+  const st = spiceStats(it), cu = cuisinesOf(it);
+  return `<div class="row item spice ${it.qty <= 0 ? 'out' : ''}" data-act="openItem" data-id="${it.id}">
+    ${thumb(it.photo)}
+    <div class="grow">
+      <div class="name">${esc(it.name)}</div>
+      <div class="meta">${cu.length ? cu.map(c => `<span class="tag">${esc(c)}</span>`).join(' ') : '<span class="muted">no cuisine set</span>'}</div>
+      <div class="meta">${st.count ? `used ${st.count}×${st.last ? `, last ${fmtWhen(st.last).replace(/ \d+:\d+.*/, '')}` : ''}` : 'not used yet'}${st.recipes ? ` · in ${st.recipes} recipe${st.recipes > 1 ? 's' : ''}` : ''}</div>
+    </div>
+    <div class="spice-amt">${it.qty <= 0 ? '<b class="warn">out</b>' : esc(totalText(it))}</div>
+  </div>`;
+}
+
+function viewSpices() {
+  const q = normalize(ui.spiceSearch);
+  let list = items().filter(isSpice);
+  if (q) list = list.filter(i => normalize(i.name).includes(q) || cuisinesOf(i).some(c => normalize(c).includes(q)));
+  const sort = ui.spiceSort;
+  let body;
+  if (!items().some(isSpice)) body = `<div class="empty"><p>No spices yet.</p><p>Add them here, or any item in Pantry → Spices shows up on this tab.</p></div>`;
+  else if (!list.length) body = `<div class="empty"><p>Nothing matches.</p></div>`;
+  else if (sort === 'cuisine') {
+    const used = [...CUISINES, ...new Set(list.flatMap(cuisinesOf).filter(c => !CUISINES.includes(c)))].filter(c => list.some(i => cuisinesOf(i).includes(c)));
+    const none = list.filter(i => !cuisinesOf(i).length);
+    const chips = chipsRow(used.map(c => ({ v: c, label: c, n: list.filter(i => cuisinesOf(i).includes(c)).length })), ui.spiceCuisine, 'spiceCuisine', 'All cuisines');
+    const groups = (ui.spiceCuisine ? [ui.spiceCuisine] : used).map(c => {
+      const inC = list.filter(i => cuisinesOf(i).includes(c)).sort((a, b) => spiceStats(b).count - spiceStats(a).count || a.name.localeCompare(b.name));
+      return inC.length ? `<h3 class="group-h">${esc(c)}</h3>${inC.map(spiceRow).join('')}` : '';
+    }).join('') + (!ui.spiceCuisine && none.length ? `<h3 class="group-h">No cuisine set</h3>${none.map(spiceRow).join('')}` : '');
+    body = chips + groups;
+  } else {
+    const sorted = [...list].sort(sort === 'qty'
+      ? (a, b) => stockAmount(b) - stockAmount(a) || a.name.localeCompare(b.name)
+      : (a, b) => spiceStats(b).count - spiceStats(a).count || spiceStats(b).last - spiceStats(a).last || a.name.localeCompare(b.name));
+    body = sorted.map(spiceRow).join('');
+  }
+  return `
+    <div class="toolbar">
+      <input id="spice-search" type="search" placeholder="Search spices or cuisines…" value="${esc(ui.spiceSearch)}" data-input="spiceSearch">
+      <div class="seg full">
+        <button class="${sort === 'used' ? 'on' : ''}" data-act="spiceSort" data-v="used">Most used</button>
+        <button class="${sort === 'cuisine' ? 'on' : ''}" data-act="spiceSort" data-v="cuisine">Cuisine</button>
+        <button class="${sort === 'qty' ? 'on' : ''}" data-act="spiceSort" data-v="qty">Most in stock</button>
+      </div>
+    </div>
+    <div class="list">${body}</div>
+    <button class="fab" data-act="newSpice">＋ Add spice</button>`;
+}
+
 // ---------------- Recipes ----------------
 function viewRecipes() {
   let list = db.list('recipes').sort((a, b) => a.title.localeCompare(b.title));
@@ -950,7 +1145,7 @@ function viewRecipe(id) {
         ${st.rows.map(({ ing, item, need, ok }, i) => `<li class="${ing.optional ? 'opt' : ok ? 'ok' : 'miss'}" data-act="ingInfo" data-id="${r.id}" data-i="${i}">
           <span class="dot"></span>
           <span class="grow"><b ${k !== 1 && ing.amount ? `title="1× batch: ${esc(ing.amount)}"` : ''}>${esc(scaleAmount(ing.amount, k))}</b> ${esc(ing.name)}</span>
-          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${fmtQty(item.qty)}${need !== 1 ? ` / need ${fmtQty(need)}` : ''}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
+          <span class="have">${ing.optional ? 'not tracked' : item ? `have ${esc(totalText(item))} · need ${esc(totalText(item, need))}` : 'not in stock'}${item?.price != null ? `<br>${money(item.price)}${item.link ? ' 🔗' : ''}` : item?.link ? '<br>🔗' : ''}</span>
           <span class="chev">›</span>
         </li>`).join('')}
       </ul>
@@ -981,7 +1176,7 @@ function makeRecipeSheet(r) {
     <p class="muted">These will be taken out of stock:</p>
     <div class="deduct">
       ${tracked.map((x, i) => `<label class="check-line"><input type="checkbox" data-i="${i}" checked>
-        ${esc(x.item.name)}: ${fmtQty(x.item.qty)} → <b>${fmtQty(Math.max(0, x.item.qty - x.need))}</b></label>`).join('') || '<p class="muted">No tracked ingredients are in stock.</p>'}
+        ${esc(x.item.name)}: ${esc(totalText(x.item))} → <b>${esc(totalText(x.item, Math.max(0, x.item.qty - x.need)))}</b></label>`).join('') || '<p class="muted">No tracked ingredients are in stock.</p>'}
     </div>
     ${st.missing.length ? `<p class="small warn">Not in stock: ${esc(st.missing.map(m => m.ing.name).join(', '))}</p>` : ''}
     <label class="check-line leftover-opt"><input type="checkbox" data-leftover checked> 🍱 Put the leftovers in the fridge <span class="muted">(shelf life ${leftoverDays()} days)</span></label>
@@ -994,8 +1189,8 @@ function makeRecipeSheet(r) {
         for (const box of s.querySelectorAll('.deduct input:checked')) {
           const x = tracked[+box.dataset.i];
           const it = db.get('items', x.item.id);
-          undo.push([it.id, it.qty]);
-          await setQty(it, it.qty - x.need);
+          undo.push({ ...it });
+          await logUse(it.id, x.need, useLabel(it, x.need), { recipe: r.title });
         }
         const text = s.querySelector('[data-note]').value.trim();
         let leftoverId = null;
@@ -1015,7 +1210,7 @@ function makeRecipeSheet(r) {
         });
         close();
         toast(leftoverId ? 'Stock updated · leftovers in the fridge' : 'Stock updated', [{ label: 'Undo', run: async () => {
-          for (const [id, q] of undo) await setQty(db.get('items', id), q);
+          for (const prev of undo) await db.put('items', prev);
           if (leftoverId) await db.remove('items', leftoverId);
         } }]);
       };
@@ -1138,10 +1333,10 @@ function viewRecipeEdit(id) {
           return `<div class="ing-row">
           <input data-ri="amount" data-i="${i}" value="${esc(g.amount)}" placeholder="1 lb" class="amt">
           <input data-ri="name" data-i="${i}" value="${esc(g.name)}" placeholder="Ingredient" list="inv-names" class="nm">
-          <input data-ri="uses" data-i="${i}" type="number" min="0" step="any" value="${fmtQty(g.uses ?? 1)}" class="qty-in" aria-label="Uses from stock" title="Uses from stock">
+          <input data-ri="uses" data-i="${i}" type="number" min="0" step="any" value="${fmtQty(m && !g.usesManual ? perBatch(g, m) : (g.uses ?? 1))}" class="qty-in" aria-label="Uses from stock" title="How many of the stock item one batch uses">
           <label class="mini"><input type="checkbox" data-ri="optional" data-i="${i}" ${g.optional ? 'checked' : ''}>staple</label>
           <button class="icon-btn" data-act="ingDel" data-i="${i}" aria-label="Remove">✕</button>
-          ${g.name && !g.optional ? `<div class="link-hint">${m ? `↳ stock: ${esc(m.name)}` : '↳ not in stock yet'}</div>` : ''}
+          ${g.name && !g.optional ? `<div class="link-hint">${esc(ingHint(g))}</div>` : ''}
         </div>`; }).join('')}
       </div>
       <button class="btn small ghost" data-act="ingAdd">＋ Ingredient</button>
@@ -1165,13 +1360,22 @@ function viewRecipeEdit(id) {
     ${invDatalist()}`;
 }
 
+// "↳ stock: ground beef (1 lb each) · uses 1 (= 1 lb, from “1 lb”)"
+function ingHint(g) {
+  const m = resolveIng({ name: g.name });
+  if (!m) return '↳ not in stock yet';
+  const per = perBatch(g, m), auto = !g.usesManual && usesFor(g.amount, m.unit, sizeOf(m)) != null;
+  const each = eachText(m);
+  return `↳ stock: ${m.name}${each ? ` (${each})` : ''} · uses ${fmtQty(per)}${unitOf(m) ? ` = ${totalText(m, per)}` : ''}${auto ? ' · worked out from the amount' : g.usesManual ? ' · set by you' : unitOf(m) ? ' · units differ, so set “uses” yourself' : ' · change “uses” if one batch takes more or less'}`;
+}
+
 async function saveRecipe() {
   const r = ui.recipeDraft;
   if (!r.title.trim()) { toast('Give the recipe a title'); $('[data-rd="title"]')?.focus(); return; }
   const { _for, ...doc } = r;
   doc.title = doc.title.trim();
   doc.ingredients = doc.ingredients.filter(g => g.name.trim()).map(g => ({
-    ...g, name: g.name.trim(), uses: g.uses === '' || g.uses == null ? 1 : +g.uses,
+    ...g, name: g.name.trim(), uses: g.uses === '' || g.uses == null ? 1 : +g.uses, usesManual: !!g.usesManual,
     itemId: findItem(g.name)?.id || null
   }));
   doc.steps = doc.steps.map(s => s.trim()).filter(Boolean);
@@ -1320,7 +1524,7 @@ function focusKey(el) {
   return null;
 }
 
-const TITLES = { stock: 'Stock', scan: 'Scan a list', grocery: 'Grocery list', recipes: 'Recipes', recipe: 'Recipe', 'recipe-edit': 'Recipe', settings: 'Settings' };
+const TITLES = { spices: 'Spices', stock: 'Stock', scan: 'Scan a list', grocery: 'Grocery list', recipes: 'Recipes', recipe: 'Recipe', 'recipe-edit': 'Recipe', settings: 'Settings' };
 
 function render() {
   const view = $('#view');
@@ -1334,7 +1538,7 @@ function render() {
   if (name !== 'recipe-edit') { ui.recipeDraft = null; ui.recipeScan = null; }
   if (name !== 'settings') catDraft = null;
   const html = {
-    stock: viewStock, scan: viewScan, grocery: viewGrocery, recipes: viewRecipes,
+    stock: viewStock, scan: viewScan, grocery: viewGrocery, recipes: viewRecipes, spices: viewSpices,
     recipe: () => viewRecipe(arg), 'recipe-edit': () => viewRecipeEdit(arg), settings: viewSettings
   }[name]?.() ?? viewStock();
   view.innerHTML = html;
@@ -1379,6 +1583,9 @@ const A = {
   newItemAt: b => itemSheet(null, { location: b.dataset.loc }),
   stockLoc: b => { ui.stockLoc = b.dataset.v; render(); },
   moveMenu: b => moveSheet(db.get('items', b.dataset.id)),
+  spiceSort: b => { ui.spiceSort = b.dataset.v; ui.spiceCuisine = null; render(); },
+  spiceCuisine: b => { ui.spiceCuisine = b.dataset.v || null; render(); },
+  newSpice: () => itemSheet(null, { category: 'pantry', sub: 'Spices', location: 'pantry', qty: 1 }),
   useLeftover: b => useLeftoverSheet(db.get('items', b.dataset.id)),
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
@@ -1561,6 +1768,7 @@ const C = {
 const I = {
   stockSearch: el => { ui.stockSearch = el.value; render(); },
   recipeSearch: el => { ui.recipeSearch = el.value; render(); },
+  spiceSearch: el => { ui.spiceSearch = el.value; render(); },
   scaleText: el => {
     const id = el.dataset.id, v = parseFloat(el.value);
     ui.scaleText[id] = el.value;
@@ -1617,10 +1825,12 @@ function bind() {
       // refresh the "↳ stock:" hint in place (a full re-draw here would swallow the next tap)
       const row = el.closest('.ing-row');
       let hint = row.querySelector('.link-hint');
+      if (el.dataset.ri === 'uses') { g.usesManual = el.value.trim() !== ''; if (g.usesManual) g.uses = +el.value; }
+      const m = g.name.trim() ? resolveIng({ name: g.name }) : null;
+      if (m && !g.usesManual) row.querySelector('[data-ri="uses"]').value = fmtQty(perBatch(g, m));
       if (g.name.trim() && !g.optional) {
-        const m = resolveIng({ name: g.name });
         if (!hint) { hint = document.createElement('div'); hint.className = 'link-hint'; row.appendChild(hint); }
-        hint.textContent = m ? `↳ stock: ${m.name}` : '↳ not in stock yet';
+        hint.textContent = ingHint(g);
       } else hint?.remove();
     }
   });
