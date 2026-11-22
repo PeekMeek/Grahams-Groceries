@@ -288,6 +288,9 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .row .x { color: var(--muted); font-weight: 600; }
 .ghost-row { opacity: var(--ghost-opacity); border-style: dashed; background: transparent; cursor: default; transition: opacity .15s; }
 .ghost-row:hover, .ghost-row:focus-within { opacity: .85; }
+.ghost-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: .65rem; cursor: pointer; border-radius: 9px; }
+.ghost-open:hover .name { text-decoration: underline; }
+.ghost-open .chev { color: #c9c2b4; font-weight: 400; }
 .ghost-dot { width: 30px; text-align: center; color: var(--mustard); font-size: 1.1rem; }
 .ghost-h { color: var(--warn); }
 .done-head { display: flex; justify-content: space-between; align-items: center; margin: 1rem 0 .3rem; }

@@ -875,10 +875,12 @@ function groceryRow(g) {
 function suggestionRow(it) {
   return `<div class="row g ghost-row">
     <span class="ghost-dot">★</span>
-    ${it.photo ? thumb(it.photo) : ''}
-    <div class="grow">
-      <div class="name">${esc(it.name)}</div>
-      <div class="meta">Only ${fmtQty(it.qty)} left${it.unit ? ' ' + esc(it.unit) : ''}</div>
+    <div class="ghost-open" data-act="openItem" data-id="${it.id}" title="See details">
+      ${it.photo ? thumb(it.photo) : ''}
+      <div class="grow">
+        <div class="name">${esc(it.name)} <span class="chev">›</span></div>
+        <div class="meta">Only ${esc(totalText(it))} left${unitOf(it) && !(sizeOf(it) === 1 && !WEIGHTS[unitOf(it)]) ? ` (${esc(eachText(it))})` : ''} · ${esc(loc(locOf(it)).name)}</div>
+      </div>
     </div>
     <button class="btn small" data-act="confirmSuggest" data-id="${it.id}">Add</button>
     <button class="btn small ghost" data-act="dismissSuggest" data-id="${it.id}" aria-label="Not now">✕</button>
