@@ -235,7 +235,12 @@ const locOf = it => LOCS.some(l => l.id === it.location) ? it.location : default
 const DAY = 86400000;
 const stockedAt = it => it.stockedAt || it.createdAt || it.updatedAt || Date.now();
 const daysIn = it => Math.max(0, Math.floor((Date.now() - stockedAt(it)) / DAY));
-const ageLimit = it => +it.warnDays > 0 ? +it.warnDays : ageDays()[locOf(it)];
+// Leftovers from "Made it" link back to their recipe and use the leftovers shelf life.
+const LEFTOVER_DEFAULT = 4;
+const leftoverDays = () => +db.get('meta', 'settings')?.leftoverDays || LEFTOVER_DEFAULT;
+const isLeftover = it => !!it?.recipeId;
+const portionLeft = q => q >= 1 ? (q === 1 ? 'Full' : `${niceQty(q)} left`) : `${niceQty(q)} left`;
+const ageLimit = it => +it.warnDays > 0 ? +it.warnDays : isLeftover(it) ? leftoverDays() : ageDays()[locOf(it)];
 // '' (fine), 'aging' (past the limit: yellow) or 'old' (past double: red). Household goods and empty items don't age.
 function ageState(it) {
   if (isNonFood(it) || it.qty <= 0) return '';
@@ -343,14 +348,19 @@ function itemRow(it) {
     ${thumb(it.photo)}
     <div class="grow">
       <div class="name">${esc(it.name)}</div>
-      <div class="meta">${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}</div>
+      <div class="meta">${isLeftover(it)
+        ? `🍱 Leftovers · made ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric' })}${ageTag}`
+        : `${c.icon} ${esc(it.sub || c.name)}${it.unit ? ' · ' + esc(it.unit) : ''}${it.price != null ? ' · ' + money(it.price) : ''}${it.link ? ' · 🔗' : ''}${ageTag}${isLow(it) ? ' · <b class="warn">running low</b>' : ''}`}</div>
     </div>
     <button class="move-btn" data-act="moveMenu" data-id="${it.id}" aria-label="Move to fridge, pantry or freezer" title="Move">⇄</button>
-    <div class="stepper">
+    ${isLeftover(it) ? `<div class="portion">
+      <span class="q">${portionLeft(it.qty)}</span>
+      <button class="btn small" data-act="useLeftover" data-id="${it.id}">Use…</button>
+    </div>` : `<div class="stepper">
       <button data-act="dec" data-id="${it.id}" aria-label="Use one">−</button>
       <span class="q">${fmtQty(it.qty)}</span>
       <button data-act="inc" data-id="${it.id}" aria-label="Add one">+</button>
-    </div>
+    </div>`}
   </div>`;
 }
 
@@ -431,6 +441,10 @@ function itemSheet(it, prefill = null) {
   openSheet(`
     <h2>${isNew ? 'Add item' : esc(it.name)}</h2>
     ${ageHtml}
+    ${isLeftover(it) ? `<div class="leftover-box">
+      <div>🍱 Leftovers from ${db.get('recipes', it.recipeId) ? `<a href="#/recipe/${it.recipeId}" data-close>${esc(db.get('recipes', it.recipeId).title)}</a>` : 'a recipe'} · <b>${portionLeft(it.qty)}</b></div>
+      <button type="button" class="btn small primary" data-uselo>Use ¼ / ½ / finish…</button>
+    </div>` : ''}
     <div class="form">
       <div class="photo-pick">
         <div class="pp-img">${thumb(photo, 'big-thumb')}</div>
@@ -456,7 +470,7 @@ function itemSheet(it, prefill = null) {
       <label>Notes<input data-f="notes" value="${esc(it.notes || '')}" placeholder="Where it's kept, brand…"></label>
     </div>
     <div class="row-end">
-      ${isNew ? '' : `<button class="btn ghost danger" data-del>Delete</button><button class="btn ghost" data-tolist>🛒 Add to list</button>`}
+      ${isNew ? '' : isLeftover(it) ? `<button class="btn ghost danger" data-toss>🗑 Throw out…</button>` : `<button class="btn ghost danger" data-del>Delete</button><button class="btn ghost" data-tolist>🛒 Add to list</button>`}
       <button class="btn primary" data-save>Save</button>
     </div>
     ${recipesHtml}`, {
@@ -523,6 +537,8 @@ function itemSheet(it, prefill = null) {
           await db.remove('items', it.id); close();
         }
       });
+      s.querySelector('[data-uselo]')?.addEventListener('click', () => { close(); useLeftoverSheet(db.get('items', it.id)); });
+      s.querySelector('[data-toss]')?.addEventListener('click', () => { close(); finishLeftover(db.get('items', it.id), 'toss'); });
       s.querySelector('[data-tolist]')?.addEventListener('click', async () => {
         if (groceryFor(it)) return toast(`${it.name} is already on the list`);
         await addToGrocery({ name: it.name, itemId: it.id }); toast(`Added ${it.name} to the grocery list`);
@@ -912,6 +928,7 @@ function viewRecipe(id) {
       ${r.photo ? pimg(r.photo, 'class="hero" data-act="viewPhoto"') : ''}
       <h2 class="rtitle">${esc(r.title)}</h2>
       <p class="meta">${[r.servings && `Serves ${esc(scaleAmount(r.servings, k))}`, r.time && `⏱ ${esc(r.time)}`, r.madeCount && `Made ${r.madeCount}×, last ${fmtWhen(r.lastMade)}`].filter(Boolean).join(' · ')}</p>
+      ${db.list('items').filter(i => i.recipeId === r.id && i.qty > 0).map(i => `<button class="leftover-line" data-act="openItem" data-id="${i.id}">🍱 Leftovers in the ${esc(loc(locOf(i)).name.toLowerCase())}: <b>${portionLeft(i.qty)}</b> · made ${fmtWhen(stockedAt(i))}${ageState(i) ? ` · <span class="age ${ageState(i)}">${fmtDays(daysIn(i))} old</span>` : ''}</button>`).join('')}
       <div class="scale-bar">
         <span class="scale-lbl">Batch</span>
         <div class="seg">
@@ -946,8 +963,9 @@ function viewRecipe(id) {
       </form>
       <div class="notes">
         ${notes.map(n => `<div class="note">
-          <div class="note-meta"><b>${esc(n.by || '?')}</b> · ${fmtWhen(n.at)}${n.kind === 'made' ? ' · <span class="pill ok">made it</span>' : ''}
+          <div class="note-meta"><b>${esc(n.by || '?')}</b> · ${fmtWhen(n.at)}${n.kind === 'made' ? ' · <span class="pill ok">made it</span>' : n.kind === 'leftover' ? ' · <span class="pill lo">leftovers</span>' : ''}
             <button class="linkish small" data-act="delNote" data-id="${r.id}" data-note="${n.id}" aria-label="Delete note">✕</button></div>
+          ${n.info ? `<div class="note-info">${esc(n.info)}</div>` : ''}
           <div>${esc(n.text).replace(/\n/g, '<br>')}</div>
         </div>`).join('') || '<p class="muted">No notes yet.</p>'}
       </div>
@@ -966,6 +984,7 @@ function makeRecipeSheet(r) {
         ${esc(x.item.name)}: ${fmtQty(x.item.qty)} → <b>${fmtQty(Math.max(0, x.item.qty - x.need))}</b></label>`).join('') || '<p class="muted">No tracked ingredients are in stock.</p>'}
     </div>
     ${st.missing.length ? `<p class="small warn">Not in stock: ${esc(st.missing.map(m => m.ing.name).join(', '))}</p>` : ''}
+    <label class="check-line leftover-opt"><input type="checkbox" data-leftover checked> 🍱 Put the leftovers in the fridge <span class="muted">(shelf life ${leftoverDays()} days)</span></label>
     <label>How did it turn out? (optional)<textarea data-note rows="2"></textarea></label>
     <div class="row-end"><button class="btn ghost" data-cancel>Cancel</button><button class="btn primary" data-ok>Update stock</button></div>`, {
     onMount(s, close) {
@@ -979,14 +998,97 @@ function makeRecipeSheet(r) {
           await setQty(it, it.qty - x.need);
         }
         const text = s.querySelector('[data-note]').value.trim();
+        let leftoverId = null;
+        if (s.querySelector('[data-leftover]').checked) {
+          leftoverId = uid();
+          const pc = cats().some(c => c.id === 'prepared') ? 'prepared' : 'other';
+          await db.put('items', {
+            id: leftoverId, name: r.title + (k !== 1 ? ` (${scaleLabel(k)})` : ''), qty: 1, unit: '',
+            category: pc, sub: cat(pc).subs.includes('Leftovers') ? 'Leftovers' : '', location: 'fridge',
+            recipeId: r.id, photo: r.photo || null, starred: false, createdAt: Date.now(), stockedAt: Date.now()
+          });
+        }
         const fresh = db.get('recipes', r.id);
         await db.put('recipes', {
           ...fresh, madeCount: (fresh.madeCount || 0) + 1, lastMade: Date.now(),
           notes: [...(fresh.notes || []), { id: uid(), at: Date.now(), by: me(), kind: 'made', text: (text || 'Made it.') + (k !== 1 ? ` [${scaleLabel(k)}]` : '') }]
         });
         close();
-        toast('Stock updated', [{ label: 'Undo', run: async () => { for (const [id, q] of undo) await setQty(db.get('items', id), q); } }]);
+        toast(leftoverId ? 'Stock updated · leftovers in the fridge' : 'Stock updated', [{ label: 'Undo', run: async () => {
+          for (const [id, q] of undo) await setQty(db.get('items', id), q);
+          if (leftoverId) await db.remove('items', leftoverId);
+        } }]);
       };
+    }
+  });
+}
+
+// ---------------- leftovers ----------------
+function useLeftoverSheet(it) {
+  if (!it) return;
+  const q = it.qty;
+  const opt = (p, label) => `<button class="btn big" data-use="${p}" ${p > q + 1e-6 ? 'disabled' : ''}>${label}${Math.abs(p - q) < 1e-6 ? '<small>finishes it</small>' : ''}</button>`;
+  openSheet(`<h2>${esc(it.name)}</h2>
+    <p class="muted small">${portionLeft(q)} · made ${fmtWhen(stockedAt(it))} · ${fmtDays(daysIn(it))} in the ${esc(loc(locOf(it)).name.toLowerCase())}</p>
+    <div class="move-opts">
+      ${opt(0.25, '<span class="mo-icon">🍽</span>Use ¼')}
+      ${opt(0.5, '<span class="mo-icon">🍽</span>Use ½')}
+      <button class="btn big" data-use="all"><span class="mo-icon">✓</span>Finished it</button>
+      <button class="btn big danger-soft" data-use="toss"><span class="mo-icon">🗑</span>Throw out the rest</button>
+    </div>`, {
+    onMount(s, close) {
+      s.querySelectorAll('[data-use]').forEach(b => b.onclick = async () => {
+        close();
+        const cur = db.get('items', it.id);
+        const v = b.dataset.use;
+        if (v === 'toss') return finishLeftover(cur, 'toss');
+        if (v === 'all') return finishLeftover(cur, 'finished');
+        const left = Math.round((cur.qty - +v) * 1000) / 1000;
+        if (left <= 0.001) return finishLeftover(cur, 'finished');
+        const before = cur.qty;
+        await db.put('items', { ...cur, qty: left });
+        toast(`${cur.name}: ${portionLeft(left)}`, [{ label: 'Undo', run: () => db.put('items', { ...db.get('items', cur.id), qty: before }) }]);
+      });
+    }
+  });
+}
+
+// Finished or thrown out: ask for notes for next time, add them to the recipe, then remove the leftovers.
+function finishLeftover(it, how) {
+  if (!it) return;
+  const r = db.get('recipes', it.recipeId);
+  const days = fmtDays(daysIn(it));
+  const info = how === 'finished' ? `Leftovers finished after ${days}` : `Leftovers thrown out after ${days}${it.qty < 1 ? ` (${niceQty(it.qty)} left)` : ''}`;
+  let done = false;
+  openSheet(`<h2>${how === 'finished' ? `All eaten 🎉` : `Throw out ${esc(it.name)}?`}</h2>
+    ${r ? `<p>Any notes for next time? They'll be added to the <b>${esc(r.title)}</b> recipe.</p>
+    <textarea data-n rows="3" placeholder="${how === 'finished' ? 'e.g. Even better on day 2 / made just the right amount' : 'e.g. Made too much — try a ½× batch / didn\'t reheat well'}"></textarea>` : '<p class="muted">The recipe for this has been deleted, so there\'s nowhere to save notes.</p>'}
+    <div class="row-end">
+      <button class="btn ghost" data-cancel>Cancel</button>
+      ${r ? '<button class="btn" data-skip>No notes</button>' : ''}
+      <button class="btn primary" data-ok>${r ? 'Save note' : how === 'finished' ? 'Done' : 'Throw out'}</button>
+    </div>`, {
+    onMount(s, close) {
+      const finish = async withNote => {
+        if (done) return; done = true;
+        const text = withNote ? s.querySelector('[data-n]')?.value.trim() : '';
+        close();
+        await db.remove('items', it.id);
+        if (r && text) {
+          const fresh = db.get('recipes', r.id);
+          await db.put('recipes', { ...fresh, notes: [...(fresh.notes || []), { id: uid(), at: Date.now(), by: me(), kind: 'leftover', info, text }] });
+        }
+        toast(text ? `Note added to ${r.title}` : how === 'finished' ? `${it.name} finished` : `${it.name} thrown out`, [{
+          label: 'Undo', run: async () => {
+            await db.put('items', { ...it });
+            if (r && text) { const f = db.get('recipes', r.id); await db.put('recipes', { ...f, notes: (f.notes || []).filter(n => !(n.kind === 'leftover' && n.text === text && n.info === info)) }); }
+          }
+        }]);
+      };
+      s.querySelector('[data-cancel]').onclick = close;
+      s.querySelector('[data-skip]')?.addEventListener('click', () => finish(false));
+      s.querySelector('[data-ok]').onclick = () => finish(true);
+      s.querySelector('[data-n]')?.focus();
     }
   });
 }
@@ -1147,6 +1249,7 @@ function viewSettings() {
       <p class="small muted">Food gets a <b class="age-sample aging">yellow border</b> after this many days in inventory and a <b class="age-sample old">red border</b> after double. Individual items can have their own limit (“Warn after” on the item). Shared with the household.</p>
       <div class="age-set">
         ${LOCS.map(l => `<label>${l.icon} ${l.name}<span class="days-in"><input type="number" min="1" step="1" inputmode="numeric" value="${ageDays()[l.id]}" data-change="ageDays" data-loc="${l.id}"> days</span></label>`).join('')}
+        <label>🍱 Leftovers (from “Made it”)<span class="days-in"><input type="number" min="1" step="1" inputmode="numeric" value="${leftoverDays()}" data-change="leftoverDays"> days</span></label>
       </div>
     </div>
     <div class="card form">
@@ -1276,6 +1379,7 @@ const A = {
   newItemAt: b => itemSheet(null, { location: b.dataset.loc }),
   stockLoc: b => { ui.stockLoc = b.dataset.v; render(); },
   moveMenu: b => moveSheet(db.get('items', b.dataset.id)),
+  useLeftover: b => useLeftoverSheet(db.get('items', b.dataset.id)),
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
   inc: b => { const it = db.get('items', b.dataset.id); setQty(it, it.qty + 1); },
@@ -1421,6 +1525,13 @@ const C = {
     const cur = db.get('meta', 'settings') || { id: 'settings' };
     db.put('meta', { ...cur, ageDays: { ...ageDays(), [el.dataset.loc]: v } });
     toast(`${loc(el.dataset.loc).name}: warn after ${v} days`);
+  },
+  leftoverDays: el => {
+    const v = parseInt(el.value);
+    if (!(v > 0)) return toast('Enter a number of days');
+    const cur = db.get('meta', 'settings') || { id: 'settings' };
+    db.put('meta', { ...cur, leftoverDays: v });
+    toast(`Leftovers: warn after ${v} days`);
   },
   recipeScan: el => runRecipeScan(el.files),
   recipeScanNew: el => {
