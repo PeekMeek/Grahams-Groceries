@@ -4,7 +4,7 @@ import { $, $$, esc, uid, fmtWhen, fmtQty, normalize, bestMatch, compressImage, 
 import { readWithClaude, readWithTesseract, parseText, readRecipeWithClaude, readRecipeWithTesseract, amountFor, usesFor, parseAmount, normUnit, WEIGHTS } from './ocr.js';
 import * as gh from './github.js';
 
-const LOW = 2; // starred items at or below this quantity go on the grocery list as suggestions
+const LOW = 2; // default: starred items at or below this quantity are suggested for the grocery list
 
 // ---------------- settings (per device) ----------------
 const SETTINGS_KEY = 'pantry.settings';
@@ -73,6 +73,7 @@ const GUESS = [
   ['pantry', 'Breakfast', 'cereal granola pancake syrup'],
   ['frozen', 'Ice cream', 'ice cream gelato'],
   ['frozen', 'Meals', 'frozen pizza'],
+  ['frozen', 'Vegetables', 'hashbrown, hashbrowns, hash brown, hash browns, tater tot, tater tots, french fry, french fries, fries, frozen pea, frozen corn, frozen vegetable, frozen broccoli'],
   ['desserts', 'Cookies', 'cookie brownie'],
   ['desserts', 'Candy & chocolate', 'chocolate candy'],
   ['desserts', 'Cakes & pies', 'cake pie cupcake'],
@@ -151,7 +152,12 @@ function priceLinkFields(price, link, priceAt) {
 const items = () => db.list('items').sort((a, b) => a.name.localeCompare(b.name));
 const isNonFood = it => !!cat(it.category).nonFood;
 const isPrepared = it => isNonFood(it) || (it.prepared ?? !!cat(it.category).prepared);
-const isLow = it => it.starred && it.qty <= LOW;
+// running-low level: the item's own, else the household default from Settings, else 2
+const lowDefault = () => { const v = db.get('meta', 'settings')?.lowAt; return v != null && v >= 0 ? +v : LOW; };
+const lowAtOf = it => it?.lowAt != null && +it.lowAt >= 0 ? +it.lowAt : lowDefault();
+const isLow = it => it.starred && it.qty <= lowAtOf(it);
+// accepts 2, 0.5, 1/2, 1 1/2, ½ — returns NaN when it isn't a number
+const qtyIn = v => { const n = parseAmount(v); return isNaN(n) ? NaN : Math.max(0, Math.round(n * 1000) / 1000); };
 const activeGrocery = () => db.list('grocery').filter(g => !g.done);
 const groceryFor = it => activeGrocery().find(g => g.itemId === it.id || normalize(g.name) === normalize(it.name));
 const suggestions = () => items().filter(it => isLow(it) && !it.lowDismissed && !groceryFor(it));
@@ -212,7 +218,8 @@ async function logUse(itemId, packs, label, extra = {}) {
   const cur = db.get('items', itemId);
   if (!cur) return;
   const usage = [{ id: uid(), at: Date.now(), by: me(), packs, label, ...extra }, ...(cur.usage || [])].slice(0, 40);
-  return setQty({ ...cur, usage }, cur.qty - packs);
+  const opened = openedDaysOf(cur) > 0 && !cur.openedAt ? { openedAt: Date.now() } : {};   // using some means it's been opened
+  return setQty({ ...cur, usage, ...opened }, cur.qty - packs);
 }
 // units you can enter a use in: "each" (one of the item) plus weights when the item is weighed
 function useUnits(it) {
@@ -309,10 +316,34 @@ const isLeftover = it => !!it?.recipeId;
 const portionLeft = q => q >= 1 ? (q === 1 ? 'Full' : `${niceQty(q)} left`) : `${niceQty(q)} left`;
 const ageLimit = it => +it.warnDays > 0 ? +it.warnDays : isLeftover(it) ? leftoverDays() : ageDays()[locOf(it)];
 // '' (fine), 'aging' (past the limit: yellow) or 'old' (past double: red). Household goods and empty items don't age.
+// ---- opened vs unopened ----
+// Typical shelf life once opened (days). Used when an item has no "once opened" value of its own.
+const OPENED_GUESS = [
+  ['oat milk', 7], ['almond milk', 7], ['soy milk', 7], ['coconut milk', 4], ['buttermilk', 14], ['milk', 7],
+  ['heavy cream', 10], ['whipping cream', 7], ['half and half', 7], ['sour cream', 14], ['cream cheese', 10], ['cream', 7],
+  ['chicken stock', 4], ['chicken broth', 4], ['beef stock', 4], ['beef broth', 4], ['vegetable stock', 4], ['vegetable broth', 4], ['bone broth', 4], ['stock', 4], ['broth', 4],
+  ['yogurt', 7], ['cottage cheese', 7], ['ricotta', 5], ['mozzarella', 5], ['shredded cheese', 5], ['hummus', 7], ['salsa', 14],
+  ['juice', 7], ['orange juice', 7], ['apple juice', 7], ['wine', 5], ['pasta sauce', 5], ['marinara', 5], ['tomato sauce', 5], ['tomato paste', 5],
+  ['deli ham', 5], ['deli turkey', 5], ['lunch meat', 5], ['bacon', 7], ['hot dog', 7], ['tofu', 4],
+  ['mayonnaise', 60], ['mayo', 60], ['ketchup', 180], ['mustard', 365], ['jam', 180], ['jelly', 180], ['pickles', 90], ['salad dressing', 60], ['bbq sauce', 120], ['maple syrup', 365]
+].map(([k, d]) => [normalize(k), d]);
+function guessOpenedDays(name) {
+  const n = ` ${normalize(name)} `;
+  const hit = OPENED_GUESS.filter(([k]) => n.includes(` ${k} `)).sort((a, b) => b[0].length - a[0].length)[0];
+  return hit ? hit[1] : 0;
+}
+// 0 = opening doesn't matter for this item
+const openedDaysOf = it => isNonFood(it) || isLeftover(it) ? 0 : it.openedDays != null ? (+it.openedDays || 0) : guessOpenedDays(it.name);
+const isOpened = it => openedDaysOf(it) > 0 && !!it.openedAt && it.qty > 0;
+// what the freshness border is measured against right now
+function freshness(it) {
+  if (isOpened(it)) return { days: Math.max(0, Math.floor((Date.now() - it.openedAt) / DAY)), limit: openedDaysOf(it), since: it.openedAt, opened: true };
+  return { days: daysIn(it), limit: ageLimit(it), since: stockedAt(it), opened: false };
+}
 function ageState(it) {
   if (isNonFood(it) || it.qty <= 0) return '';
-  const d = daysIn(it), t = ageLimit(it);
-  return d >= 2 * t ? 'old' : d >= t ? 'aging' : '';
+  const { days, limit } = freshness(it);
+  return days >= 2 * limit ? 'old' : days >= limit ? 'aging' : '';
 }
 const fmtDays = d => d === 0 ? 'less than a day' : d === 1 ? '1 day' : `${d} days`;
 const shortDays = d => d < 1 ? 'new' : d < 60 ? `${d}d` : d < 730 ? `${Math.floor(d / 30.4)}mo` : `${Math.floor(d / 365)}y`;
@@ -320,11 +351,12 @@ const shortDays = d => d < 1 ? 'new' : d < 60 ? `${d}d` : d < 730 ? `${Math.floo
 async function setQty(it, qty) {
   qty = Math.max(0, Math.round(qty * 100) / 100);
   const patch = { ...it, qty };
-  if (qty > LOW) patch.lowDismissed = false;
+  if (qty > lowAtOf(patch)) patch.lowDismissed = false;
   if (!LOCS.some(l => l.id === patch.location)) patch.location = locOf(it);
   if (!patch.createdAt) patch.createdAt = it.updatedAt || Date.now();
   // the time-in-inventory counter restarts when an item is restocked after running out
-  if ((+it.qty || 0) <= 0 && qty > 0) patch.stockedAt = Date.now();
+  if ((+it.qty || 0) <= 0 && qty > 0) { patch.stockedAt = Date.now(); patch.openedAt = null; }
+  if (qty <= 0) patch.openedAt = null;
   else if (!patch.stockedAt) patch.stockedAt = stockedAt(it);
   return db.put('items', patch);
 }
@@ -409,7 +441,10 @@ function grouped(list, rowFn) {
 function itemRow(it) {
   const c = cat(it.category);
   const age = ageState(it), d = daysIn(it);
-  const ageTag = it.qty > 0 && !isNonFood(it) ? ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>` : '';
+  const fr = freshness(it);
+  const ageTag = it.qty <= 0 || isNonFood(it) ? ''
+    : fr.opened ? ` · <span class="age ${age}" title="Opened ${fmtDays(fr.days)} ago · good for ${fr.limit} days once opened">🔓 opened ${shortDays(fr.days)}</span>`
+    : ` · <span class="age ${age}" title="In inventory for ${fmtDays(d)}">⏱ ${shortDays(d)}</span>${openedDaysOf(it) > 0 ? ` <button class="open-link" data-act="markOpened" data-id="${it.id}" title="Start the ${openedDaysOf(it)}-day opened timer">sealed · open?</button>` : ''}`;
   return `<div class="row item ${isLow(it) ? 'low' : ''} ${it.qty <= 0 ? 'out' : ''} ${age}" data-act="openItem" data-id="${it.id}" draggable="true">
     <button class="star ${it.starred ? 'on' : ''}" data-act="star" data-id="${it.id}" aria-label="Star">★</button>
     ${thumb(it.photo)}
@@ -496,13 +531,23 @@ function itemSheet(it, prefill = null) {
           : `<button class="btn small" data-addmissing="${r.id}">🛒 Add to grocery list</button>`}
       </div>`).join('') : `<p class="muted">No saved recipes use ${esc(it.name)} yet. <a href="#/recipe-edit/new" data-close>Add one</a>.</p>`}
     </div>`;
-  const d = daysIn(it), lim = ageLimit(it), age = ageState(it);
-  const ageHtml = isNew ? '' : it.qty <= 0
+  const d = daysIn(it), lim = ageLimit(it), age = ageState(it), fr = freshness(it), od = openedDaysOf(it);
+  const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  const ageHtml = isNew ? '' : it.qty > 0 && fr.opened
+    ? `<div class="age-box ${age}">
+        <div><b>🔓 Opened <span data-age-days>${fmtDays(fr.days)}</span> ago</b>
+          <span class="small muted">opened ${day(it.openedAt)} · ${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'good for'} ${od} days once opened · ${fmtDays(d)} in inventory</span></div>
+        <div class="age-btns"><button type="button" class="btn small ghost" data-opened-new>Opened a new one</button><button type="button" class="btn small ghost" data-unopen>Mark unopened</button></div>
+      </div>`
+    : it.qty <= 0
     ? `<div class="age-box"><b>Out of stock.</b> The time-in-inventory counter restarts when it's restocked.</div>`
     : `<div class="age-box ${age}">
         <div><b>In inventory: <span data-age-days>${fmtDays(d)}</span></b>
-          <span class="small muted">since ${new Date(stockedAt(it)).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}${isNonFood(it) ? '' : ` · ${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'warns after'} ${lim} days`}</span></div>
-        <button type="button" class="btn small ghost" data-restock>Restocked today</button>
+          <span class="small muted">since ${day(stockedAt(it))}${isNonFood(it) ? '' : ` · ${od > 0 ? 'unopened, ' : ''}${age === 'old' ? 'well past' : age === 'aging' ? 'past' : 'warns after'} ${lim} days`}</span></div>
+        <div class="age-btns">
+          ${!isNonFood(it) && !isLeftover(it) ? `<button type="button" class="btn small ${od > 0 ? 'primary' : 'ghost'}" data-mark-opened>🔓 Mark opened</button>` : ''}
+          <button type="button" class="btn small ghost" data-restock>Restocked today</button>
+        </div>
       </div>`;
 
   openSheet(`
@@ -540,7 +585,11 @@ function itemSheet(it, prefill = null) {
         <label>Type<select data-f="sub">${subOptions(it.category, it.sub)}</select></label>
       </div>
       <div class="two">
-        <label>How many<input data-f="qty" type="number" step="any" min="0" value="${fmtQty(it.qty)}"></label>
+        <label>How many
+          <input data-f="qty" type="text" inputmode="decimal" value="${fmtQty(it.qty)}" autocomplete="off" aria-describedby="qty-help">
+          <span class="qty-quick">${[['¼', .25], ['½', .5], ['¾', .75], ['1', 1]].map(([l, v]) => `<button type="button" class="chip" data-setqty="${v}">${l}</button>`).join('')}</span>
+          <span class="field-note" id="qty-help">Fractions work: 1/2, 1 1/2, ½ or 0.5</span>
+        </label>
         <label>Size of one <span class="opt-tag">(optional)</span>
           <span class="size-in">
             <input data-f="size" type="text" inputmode="decimal" value="${it.unit ? fmtQty(sizeOf(it)) : ''}" placeholder="1" aria-label="Amount in one">
@@ -557,11 +606,19 @@ function itemSheet(it, prefill = null) {
       </div>
       <div class="field-label">Kept in</div>
       <div class="seg full loc-pick">${LOCS.map(l => `<button type="button" data-where="${l.id}" class="${where === l.id ? 'on' : ''}">${l.icon} ${l.name}</button>`).join('')}</div>
-      <label class="warn-days" ${isNonFood(it) ? 'hidden' : ''}>Warn after (days)
-        <input data-f="warnDays" type="number" min="1" step="1" inputmode="numeric" value="${+it.warnDays > 0 ? +it.warnDays : ''}" placeholder="${ageDays()[where]} — ${loc(where).name.toLowerCase()} default">
-      </label>
+      <div class="two shelf-life warn-days" ${isNonFood(it) ? 'hidden' : ''}>
+        <label>Good for, unopened (days)
+          <input data-f="warnDays" type="number" min="1" step="1" inputmode="numeric" value="${+it.warnDays > 0 ? +it.warnDays : ''}" placeholder="${ageDays()[where]} — ${loc(where).name.toLowerCase()} default">
+        </label>
+        <label>Once opened, good for (days)
+          <input data-f="openedDays" type="number" min="0" step="1" inputmode="numeric" value="${it.openedDays != null ? +it.openedDays : ''}" placeholder="${!isLeftover(it) && guessOpenedDays(it.name) ? `${guessOpenedDays(it.name)} — typical` : 'leave empty if it doesn’t matter'}">
+        </label>
+      </div>
       ${priceLinkFields(it.price, it.link, it.priceAt)}
-      <label class="check-line"><input type="checkbox" data-f="starred" ${it.starred ? 'checked' : ''}> ★ Starred — suggest for the grocery list when ${LOW} or fewer are left</label>
+      <div class="check-line star-line"><label class="inline"><input type="checkbox" data-f="starred" ${it.starred ? 'checked' : ''}> ★ Starred</label>
+        <span>— suggest for the grocery list when
+          <input data-f="lowAt" type="text" inputmode="decimal" class="low-in" value="${it.lowAt != null ? fmtQty(+it.lowAt) : ''}" placeholder="${fmtQty(lowDefault())}" aria-label="Running-low level">
+          or fewer are left</span></div>
       <label class="check-line prep-line" ${isNonFood(it) ? 'hidden' : ''}><input type="checkbox" data-f="prepared" ${!isNonFood(it) && isPrepared(it) ? 'checked' : ''}> Prepared / ready-to-eat (no recipe suggestions)</label>
       <label>Notes<input data-f="notes" value="${esc(it.notes || '')}" placeholder="Where it's kept, brand…"></label>
     </div>
@@ -586,6 +643,23 @@ function itemSheet(it, prefill = null) {
       s.querySelectorAll('[data-where]').forEach(b => b.onclick = () => { whereTouched = true; setWhere(b.dataset.where); });
       f('category').onchange = () => { f('sub').innerHTML = subOptions(f('category').value, ''); syncPrep(); };
       f('sub').addEventListener('change', syncPrep);
+      const reopen = () => { close(); itemSheet(db.get('items', it.id)); };
+      s.querySelector('[data-mark-opened]')?.addEventListener('click', async () => {
+        const typed = parseInt(f('openedDays').value);
+        const days = typed > 0 ? typed : openedDaysOf(it) || 7;
+        await db.put('items', { ...db.get('items', it.id), openedAt: Date.now(), openedDays: days });
+        toast(`${it.name} opened — good for ${days} days`);
+        reopen();
+      });
+      s.querySelector('[data-opened-new]')?.addEventListener('click', async () => {
+        await db.put('items', { ...db.get('items', it.id), openedAt: Date.now() });
+        toast(`Opened a new ${it.name} — timer restarted`);
+        reopen();
+      });
+      s.querySelector('[data-unopen]')?.addEventListener('click', async () => {
+        await db.put('items', { ...db.get('items', it.id), openedAt: null });
+        reopen();
+      });
       s.querySelector('[data-restock]')?.addEventListener('click', e => {
         restockedAt = Date.now();
         s.querySelector('[data-age-days]').textContent = fmtDays(0);
@@ -621,12 +695,14 @@ function itemSheet(it, prefill = null) {
           price, priceAt: price === (it.price ?? null) ? it.priceAt : (price == null ? null : Date.now()),
           link: cleanLink(f('link').value),
           starred: f('starred').checked, photo,
+          lowAt: f('lowAt').value.trim() === '' || isNaN(qtyIn(f('lowAt').value)) ? null : qtyIn(f('lowAt').value),
           location: where,
           ...(isSpice({ category, sub: f('sub').value }) ? { cuisines: [...new Set([...cuis, ...f('cuisineOther').value.split(',').map(x => x.trim()).filter(Boolean)])] } : {}),
           warnDays: parseInt(f('warnDays').value) > 0 ? parseInt(f('warnDays').value) : null,
+          openedDays: f('openedDays').value.trim() === '' ? null : Math.max(0, parseInt(f('openedDays').value) || 0),
           ...(restockedAt ? { stockedAt: restockedAt } : {}),
           prepared: cat(category).nonFood || prepared === !!cat(category).prepared ? undefined : prepared
-        }, parseFloat(f('qty').value) || 0);
+        }, isNaN(qtyIn(f('qty').value)) ? (+it.qty || 0) : qtyIn(f('qty').value));
         close();
         toast(isNew ? `Added ${name}` : `Saved ${name}`);
       };
@@ -669,13 +745,16 @@ function itemSheet(it, prefill = null) {
       s.querySelector('[data-use-amt]')?.addEventListener('keydown', e => { if (e.key === 'Enter') s.querySelector('[data-use-go]').click(); });
       s.querySelectorAll('[data-use-quick]').forEach(b => b.addEventListener('click', () => doUse(+b.dataset.useQuick)));
       const showTotal = () => {
-        const q = parseFloat(f('qty').value) || 0, u = normUnit(f('unit').value), sz = parseAmount(f('size').value);
+        const q = qtyIn(f('qty').value) || 0, u = normUnit(f('unit').value), sz = parseAmount(f('size').value);
         const one = sz > 0 ? sz : 1;
         s.querySelector('[data-total]').innerHTML = u
           ? `Total: <b>${fmtQty(q)}</b> × ${esc(amt(one, u))} = <b>${esc(amt(Math.round(q * one * 100) / 100, u))}</b>`
           : `<span class="muted">Add a size (e.g. 1 lb, 12 oz, 1 can) to see the total amount.</span>`;
       };
       ['qty', 'size', 'unit'].forEach(k => f(k).addEventListener('input', showTotal));
+      s.querySelectorAll('[data-setqty]').forEach(b => b.onclick = () => { f('qty').value = b.dataset.setqty; showTotal(); });
+      f('qty').addEventListener('change', () => { const v = qtyIn(f('qty').value); f('qty').classList.toggle('bad', isNaN(v)); });
+      f('lowAt').addEventListener('focus', () => { if (!f('starred').checked) f('starred').checked = true; });
       showTotal();
       s.querySelector('[data-uselo]')?.addEventListener('click', () => { close(); useLeftoverSheet(db.get('items', it.id)); });
       s.querySelector('[data-toss]')?.addEventListener('click', () => { close(); finishLeftover(db.get('items', it.id), 'toss'); });
@@ -988,7 +1067,7 @@ function grocerySheet(g) {
         <label>Type<select data-f="sub">${subOptions(g.category, g.sub)}</select></label>
       </div>
       <div class="two">
-        <label>Quantity<input data-f="qty" type="number" min="1" step="any" value="${fmtQty(g.qty)}"></label>
+        <label>Quantity<input data-f="qty" type="text" inputmode="decimal" value="${fmtQty(g.qty)}"></label>
         <label>Note<input data-f="note" value="${esc(g.note || '')}"></label>
       </div>
       ${priceLinkFields(it ? it.price : g.price, it ? it.link : g.link, it ? it.priceAt : g.priceAt)}
@@ -1005,7 +1084,7 @@ function grocerySheet(g) {
       };
       s.querySelector('[data-save]').onclick = async () => {
         const price = parsePrice(f('price').value), link = cleanLink(f('link').value);
-        const upd = { ...g, name: f('name').value.trim() || g.name, category: f('category').value, sub: f('sub').value, qty: parseFloat(f('qty').value) || 1, note: f('note').value.trim(), photo };
+        const upd = { ...g, name: f('name').value.trim() || g.name, category: f('category').value, sub: f('sub').value, qty: qtyIn(f('qty').value) || 1, note: f('note').value.trim(), photo };
         if (it) {
           const cur = db.get('items', it.id);
           if (price !== (cur.price ?? null) || link !== (cur.link || ''))
@@ -1451,10 +1530,11 @@ function viewSettings() {
       </div>
     </div>
     <div class="card form">
-      <h2>Freshness warnings</h2>
+      <h2>Freshness &amp; running low</h2>
       <p class="small muted">Food gets a <b class="age-sample aging">yellow border</b> after this many days in inventory and a <b class="age-sample old">red border</b> after double. Individual items can have their own limit (“Warn after” on the item). Shared with the household.</p>
       <div class="age-set">
         ${LOCS.map(l => `<label>${l.icon} ${l.name}<span class="days-in"><input type="number" min="1" step="1" inputmode="numeric" value="${ageDays()[l.id]}" data-change="ageDays" data-loc="${l.id}"> days</span></label>`).join('')}
+        <label>★ Running low at<span class="days-in"><input type="text" inputmode="decimal" value="${fmtQty(lowDefault())}" data-change="lowDefault"> or fewer</span></label>
         <label>🍱 Leftovers (from “Made it”)<span class="days-in"><input type="number" min="1" step="1" inputmode="numeric" value="${leftoverDays()}" data-change="leftoverDays"> days</span></label>
       </div>
     </div>
@@ -1589,6 +1669,12 @@ const A = {
   spiceCuisine: b => { ui.spiceCuisine = b.dataset.v || null; render(); },
   newSpice: () => itemSheet(null, { category: 'pantry', sub: 'Spices', location: 'pantry', qty: 1 }),
   useLeftover: b => useLeftoverSheet(db.get('items', b.dataset.id)),
+  markOpened: async b => {
+    const it = db.get('items', b.dataset.id);
+    const days = openedDaysOf(it) || 7;
+    await db.put('items', { ...it, openedAt: Date.now(), openedDays: it.openedDays ?? days });
+    toast(`${it.name} opened — good for ${days} days`, [{ label: 'Undo', run: () => db.put('items', { ...db.get('items', it.id), openedAt: null }) }]);
+  },
   openItem: b => itemSheet(db.get('items', b.dataset.id)),
   star: b => { const it = db.get('items', b.dataset.id); db.put('items', { ...it, starred: !it.starred }); },
   inc: b => { const it = db.get('items', b.dataset.id); setQty(it, it.qty + 1); },
@@ -1734,6 +1820,13 @@ const C = {
     const cur = db.get('meta', 'settings') || { id: 'settings' };
     db.put('meta', { ...cur, ageDays: { ...ageDays(), [el.dataset.loc]: v } });
     toast(`${loc(el.dataset.loc).name}: warn after ${v} days`);
+  },
+  lowDefault: el => {
+    const v = qtyIn(el.value);
+    if (isNaN(v)) return toast('Enter a number, e.g. 2 or 1/2');
+    const cur = db.get('meta', 'settings') || { id: 'settings' };
+    db.put('meta', { ...cur, lowAt: v });
+    toast(`Starred items are suggested at ${fmtQty(v)} or fewer (unless an item has its own level)`);
   },
   leftoverDays: el => {
     const v = parseInt(el.value);

@@ -1,6 +1,6 @@
 // Service worker: caches the app shell so Pantry opens offline.
 // Bump VERSION whenever you push changes so phones pick up the new files.
-const VERSION = 'pantry-v17';
+const VERSION = 'pantry-v19';
 const SHELL = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/app.js', './js/db.js', './js/ocr.js', './js/categories.js', './js/util.js', './js/github.js',
