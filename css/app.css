@@ -185,7 +185,8 @@ input[type=checkbox] { width: auto; min-height: 0; }
 .days-in { display: flex; align-items: center; gap: .4rem; margin-top: .25rem; color: var(--ink); font-weight: 500; }
 .days-in input { max-width: 100px; margin: 0 !important; }
 .field-label { font-size: .85rem; font-weight: 600; color: var(--muted); margin-bottom: .25rem; }
-.loc-pick { margin: 0 0 .7rem !important; }
+.loc-pick { margin: 0 0 .7rem !important; display: grid !important; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr)); }
+.loc-pick button { white-space: nowrap; font-size: .85rem; }
 .warn-days[hidden] { display: none !important; }
 .suggested { margin-top: 1.2rem; padding-top: .2rem; border-top: 1px solid var(--line); }
 
@@ -278,12 +279,32 @@ input.bad { outline: 2px solid #d23f2f; }
 .mo-icon { font-size: 1.4rem; }
 .row.item[draggable] { cursor: grab; }
 .row.item.dragging { opacity: .4; }
-.loc-col.drop-ready { outline: 2px dashed #c9c2b4; outline-offset: -2px; }
-.loc-col.drop-over { outline: 2px dashed var(--herb-2); background: #eef5ef !important; }
+.drop-zone.drop-ready { outline: 2px dashed #c9c2b4; outline-offset: -2px; }
+.drop-zone.drop-over { outline: 2px dashed var(--herb-2); background: #eef5ef !important; }
 
 /* stock: Fridge / Pantry / Deep freezer */
 .stock-hint { text-align: center; margin: .2rem 0 .8rem; }
-.loc-switch { display: flex; margin: .2rem 0 .7rem; }
+.loc-switch { display: flex; margin: .2rem 0 .7rem; overflow-x: auto; scrollbar-width: none; }
+.loc-switch::-webkit-scrollbar { display: none; }
+.loc-switch button { flex: 1 0 auto; white-space: nowrap; }
+/* the fridge panel: door | main fridge, freezer underneath (stacked on phones) */
+.fridge-grid { display: grid; gap: .7rem; }
+.fridge-grid > *, .loc-cols > * { min-width: 0; }
+/* rows in narrow sections: name on its own line, buttons underneath */
+.loc-cols .list { container-type: inline-size; }
+@container (max-width: 380px) {
+  .row.item { flex-wrap: wrap; row-gap: .3rem; }
+  .row.item .grow { flex: 1 1 calc(100% - 44px); }
+  .row.item .name { white-space: normal; }
+  .row.item .move-btn { margin-left: auto; }
+  .row.item .stepper button { width: 36px; height: 36px; }
+}
+.fridge-part { border-radius: 14px; padding: .5rem; background: rgba(255,255,255,.35); border: 1px solid var(--line); }
+.part-door { background: #f5f8fb; }
+.part-fridgefreezer { background: #eef5fb; border-color: #d6e4f0; }
+.part-h { display: flex; justify-content: space-between; align-items: baseline; font-weight: 800; font-size: .95rem; padding: .1rem .3rem .5rem; }
+.part-h small { color: var(--muted); font-weight: 600; font-size: .8rem; }
+.fridge-part .col-empty { padding: .5rem 0; }
 .loc-switch button small { color: var(--muted); font-weight: 500; }
 .loc-cols { display: block; }
 .loc-col { display: none; }
@@ -295,10 +316,17 @@ input.bad { outline: 2px solid #d23f2f; }
   #view[data-route=stock] { max-width: 1900px; }
   #view[data-route=stock] .toolbar, #view[data-route=stock] .stock-hint { max-width: 760px; margin-left: auto; margin-right: auto; }
   #view[data-route=stock] .fab, #view .seg.loc-switch { display: none; }
-  .loc-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.2rem; align-items: start; margin-top: .6rem; }
+  .loc-cols { display: grid; grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 1fr)); gap: 1.2rem; align-items: start; margin-top: .6rem; }
+  .fridge-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .part-fridgefreezer { grid-column: 1 / -1; }
+  .fridge-unit { grid-row: span 2; }
   .loc-col, .loc-col.on { display: block; background: rgba(255,255,255,.5); border: 1px solid var(--line); border-radius: 18px; padding: .8rem; min-height: 260px; }
   .loc-h { display: flex; align-items: baseline; justify-content: space-between; padding: .1rem .3rem .7rem; font-size: 1.2rem; font-weight: 800; letter-spacing: .01em; }
   .loc-h small { font-size: .85rem; color: var(--muted); font-weight: 600; }
+}
+@media (min-width: 1700px) {
+  .loc-cols { grid-template-columns: minmax(0, 2fr) repeat(4, minmax(0, 1fr)); }
+  .fridge-unit { grid-row: auto; }
 }
 .row.item.out .name { color: var(--muted); }
 .stepper { display: flex; align-items: center; background: var(--cream); border-radius: 11px; border: 1px solid var(--line); }

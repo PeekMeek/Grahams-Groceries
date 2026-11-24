@@ -14,7 +14,7 @@ const me = () => S.name || 'Someone';
 
 // ---------------- UI state (survives re-renders) ----------------
 const ui = {
-  stockLoc: 'fridge',
+  stockLoc: 'fridgeunit',
   stockMode: 'all', stockCat: null, stockSub: null, stockSearch: '', starredOnly: false,
   gMode: 'all', gCat: null, gSub: null, showDone: false,
   gDraft: { name: '', qty: 1, photo: null, category: '', sub: '', note: '' },
@@ -230,7 +230,7 @@ async function openOne(itemId, days) {
   const od = days || openedDaysOf(p) || 7;
   const copy = {
     id: uid(), name: p.name, category: p.category, sub: p.sub, unit: p.unit || '', size: p.size, price: p.price ?? null, link: p.link || '',
-    photo: p.photo || null, cuisines: p.cuisines, openedDays: od, openedAt: Date.now(), openedFrom: p.id, location: 'fridge',
+    photo: p.photo || null, cuisines: p.cuisines, openedDays: od, openedAt: Date.now(), openedFrom: p.id, location: p.location === 'door' ? 'door' : 'fridge',
     qty: take, starred: false, createdAt: Date.now(), stockedAt: stockedAt(p), usage: []
   };
   await db.put('items', copy);
@@ -277,6 +277,19 @@ function useUnits(it) {
   const each = u ? (sz === 1 && !isMeasure(u) ? plural(u, 2) : `× ${amt(sz, u)} (whole)`) : 'each';
   const measures = isMeasure(u) ? [...new Set([u, 'oz', 'lb', 'g', 'tsp', 'tbsp', 'cup', 'fl oz', 'ml', 'L', ...(/butter/i.test(it.name) ? ['stick'] : [])])] : [];
   return [{ v: 'each', label: each }, ...measures.map(w => ({ v: w, label: w === 'tbsp' ? 'Tbsp' : w }))];
+}
+const WEIGHTS_ONLY = it => /butter|cheese|flour|sugar|spice/i.test(densName(it));
+// sensible default for "Used some": the last unit used for this item, else a kitchen measure — never the whole container
+function useDefaultUnit(it) {
+  const opts = useUnits(it).map(o => o.v);
+  if (it.lastUseUnit && opts.includes(it.lastUseUnit)) return it.lastUseUnit;
+  const u = unitOf(it);
+  if (VOLUMES[u] || (u === 'oz' && !WEIGHTS_ONLY(it))) {
+    const ml = convertQty(sizeOf(it), u, 'ml', densName(it)) || 0;
+    return ml >= 470 ? 'cup' : 'tbsp';                  // pints and bigger: cups; smaller bottles: Tbsp
+  }
+  if (WEIGHTS[u]) return /butter/i.test(it.name) ? 'tbsp' : u === 'g' || u === 'kg' ? 'g' : 'oz';
+  return 'each';
 }
 const toPacks = (it, a, unit) => {
   if (unit === 'each' || !isMeasure(unit) || !isMeasure(unitOf(it))) return a;
@@ -344,14 +357,22 @@ const recipesUsing = it => db.list('recipes').filter(r => (r.ingredients || []).
 
 // ---------------- storage locations & time in inventory ----------------
 const LOCS = [
+  { id: 'door', name: 'Fridge door', short: 'Door', icon: '🚪' },
   { id: 'fridge', name: 'Fridge', short: 'Fridge', icon: '🥛' },
+  { id: 'fridgefreezer', name: 'Freezer', short: 'Freezer', icon: '🧊' },
+  { id: 'snacks', name: 'Snack cabinet', short: 'Snacks', icon: '🍿' },
   { id: 'pantry', name: 'Pantry', short: 'Pantry', icon: '🥫' },
-  { id: 'freezer', name: 'Deep freezer', short: 'Freezer', icon: '❄️' },
+  { id: 'freezer', name: 'Deep freezer', short: 'Deep freezer', icon: '❄️' },
   { id: 'stovetop', name: 'Stovetop', short: 'Stovetop', icon: '🍳' }
+];
+// How the Stock page is laid out: the fridge is one panel (door | fridge, freezer underneath)
+const STOCK_COLS = [
+  { id: 'fridgeunit', name: 'Fridge', short: 'Fridge', icon: '🥛', parts: ['door', 'fridge', 'fridgefreezer'] },
+  { id: 'snacks' }, { id: 'pantry' }, { id: 'freezer' }, { id: 'stovetop' }
 ];
 const loc = id => LOCS.find(l => l.id === id) || LOCS[1];
 // Days before an item gets a yellow border (red at double). Shared by the household; editable in Settings.
-const AGE_DEFAULTS = { fridge: 14, pantry: 365, freezer: 180, stovetop: 365 };
+const AGE_DEFAULTS = { door: 30, fridge: 14, fridgefreezer: 90, snacks: 180, pantry: 365, freezer: 180, stovetop: 365 };
 const ageDays = () => ({ ...AGE_DEFAULTS, ...(db.get('meta', 'settings')?.ageDays || {}) });
 // ---- Stovetop: oils, plus salt & pepper and any spice you choose ----
 const isOil = it => /\boil\b|cooking spray/.test(normalize(it?.name || '')) && !isNonFood(it);
@@ -361,6 +382,8 @@ const isStoveStaple = it => isSpice(it) && STOVE_SPICES.test(normalize(it.name))
 const onStoveOf = it => locOf(it) === 'stovetop' || (it.onStove ?? (isOil(it) || isStoveStaple(it)));
 function defaultLocation(category, sub, name = '') {
   if (sub === 'Oils & vinegars' && /\boil\b/i.test(name)) return 'stovetop';
+  if (category === 'snacks' || ['Cookies', 'Candy & chocolate'].includes(sub)) return 'snacks';
+  if (sub === 'Sauces & condiments') return 'door';
   if (category === 'frozen' || sub === 'Ice cream') return 'freezer';
   if (['meats', 'dairy', 'prepared'].includes(category)) return 'fridge';
   if (category === 'veggies') return ['Onions & garlic', 'Root vegetables'].includes(sub) ? 'pantry' : 'fridge';
@@ -541,7 +564,26 @@ function viewStock() {
   const filtering = q || ui.starredOnly || (ui.stockMode === 'cat' && ui.stockCat);
   const none = !db.list('items').length;
   const inColumn = (l, list) => l.id === 'stovetop' ? list.filter(onStoveOf) : list.filter(it => locOf(it) === l.id);
-  const column = l => {
+  const part = id => {
+    const l = loc(id), inLoc = inColumn(l, shown);
+    const body = inLoc.length
+      ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(it => itemRow(it)).join(''))
+      : `<p class="col-empty">${filtering ? 'Nothing matches.' : 'Empty'}</p>`;
+    return `<div class="fridge-part drop-zone part-${id}" data-loc="${id}">
+      <header class="part-h"><span>${l.icon} ${l.id === 'fridge' ? 'Main fridge' : l.name}</span><small>${inLoc.length}</small></header>
+      <div class="list">${body}</div>
+      <button class="btn ghost small add-here" data-act="newItemAt" data-loc="${id}">＋ Add</button>
+    </div>`;
+  };
+  const column = c => {
+    if (c.parts) {
+      const n = c.parts.reduce((a, id) => a + inColumn(loc(id), shown).length, 0);
+      return `<section class="loc-col fridge-unit ${ui.stockLoc === c.id ? 'on' : ''}">
+        <header class="loc-h"><span>${c.icon} ${c.name}</span><small>${n}</small></header>
+        <div class="fridge-grid">${c.parts.map(part).join('')}</div>
+      </section>`;
+    }
+    const l = loc(c.id);
     const inLoc = inColumn(l, shown);
     let body;
     if (l.id === 'stovetop') {
@@ -553,7 +595,7 @@ function viewStock() {
     } else body = inLoc.length
       ? (ui.stockMode === 'cat' && !ui.stockCat ? grouped(inLoc, itemRow) : inLoc.map(it => itemRow(it)).join(''))
       : `<p class="col-empty">${filtering ? 'Nothing matches here.' : 'Nothing here yet.'}</p>`;
-    return `<section class="loc-col ${ui.stockLoc === l.id ? 'on' : ''}" data-loc="${l.id}">
+    return `<section class="loc-col drop-zone ${ui.stockLoc === l.id ? 'on' : ''}" data-loc="${l.id}">
       <header class="loc-h"><span>${l.icon} ${l.name}</span><small>${inLoc.length}</small></header>
       <div class="list">${body}</div>
       <button class="btn ghost small add-here" data-act="newItemAt" data-loc="${l.id}">＋ Add to ${l.name.toLowerCase()}</button>
@@ -573,10 +615,11 @@ function viewStock() {
     </div>
     ${none ? `<p class="stock-hint muted">Nothing in stock yet. Add items to a column below, or <a href="#/scan">scan a list</a> to add a whole haul at once.</p>` : ''}
     <div class="seg full loc-switch">
-      ${LOCS.map(l => `<button class="${ui.stockLoc === l.id ? 'on' : ''}" data-act="stockLoc" data-v="${l.id}">${l.icon} ${l.short} <small>${inColumn(l, shown).length}</small></button>`).join('')}
+      ${STOCK_COLS.map(c => { const l = c.parts ? c : loc(c.id); const n = c.parts ? c.parts.reduce((a, id) => a + inColumn(loc(id), shown).length, 0) : inColumn(l, shown).length;
+        return `<button class="${ui.stockLoc === c.id ? 'on' : ''}" data-act="stockLoc" data-v="${c.id}">${l.icon} ${c.parts ? c.short : l.short} <small>${n}</small></button>`; }).join('')}
     </div>
-    <div class="loc-cols">${LOCS.map(column).join('')}</div>
-    <button class="fab" data-act="newItemAt" data-loc="${ui.stockLoc}">＋ Add item</button>`;
+    <div class="loc-cols">${STOCK_COLS.map(column).join('')}</div>
+    <button class="fab" data-act="newItemAt" data-loc="${ui.stockLoc === 'fridgeunit' ? 'fridge' : ui.stockLoc}">＋ Add item</button>`;
 }
 
 const isNewCopyNote = it => isOpenedCopy(it) && db.get('items', it.openedFrom)
@@ -633,16 +676,21 @@ function itemSheet(it, prefill = null) {
     ${ageHtml}
     ${!isNew && !isLeftover(it) && it.qty > 0 ? (() => {
       const opts = useUnits(it), u = unitOf(it), sz = sizeOf(it);
-      const defUnit = isMeasure(u) ? u : 'each';
-      const chips = (WEIGHTS[u] || sz !== 1 ? [0.25, 0.5, 1] : [1, 2]).filter(p => p <= it.qty + 1e-9);
+      const defUnit = useDefaultUnit(it);
+      const have = availableQty(it);
+      // quick amounts in kitchen measures for liquids/weighed food, otherwise fractions of one
+      const chips = (VOLUMES[u] || (u === 'oz' && !WEIGHTS_ONLY(it))) ? [['1 Tbsp', 1, 'tbsp'], ['¼ cup', 0.25, 'cup'], ['½ cup', 0.5, 'cup'], ['1 cup', 1, 'cup']]
+        : WEIGHTS[u] ? (/butter/i.test(it.name) ? [['1 Tbsp', 1, 'tbsp'], ['½ stick', 0.5, 'stick'], ['1 stick', 1, 'stick']] : [['1 oz', 1, 'oz'], ['4 oz', 4, 'oz'], ['8 oz', 8, 'oz'], ['1 lb', 1, 'lb']])
+        : sz !== 1 ? [['¼', 0.25, 'each'], ['½', 0.5, 'each'], ['1', 1, 'each']] : [['1', 1, 'each'], ['2', 2, 'each']];
+      const okChips = chips.filter(([, a, un]) => toPacks(it, a, un) <= have + 1e-9);
       return `<div class="use-box">
         <div class="use-head"><b>Used some?</b><span class="small muted">${esc(totalText(it))} in stock</span></div>
         <div class="use-row">
-          <input data-use-amt type="text" inputmode="decimal" placeholder="${WEIGHTS[u] ? fmtQty(sz) : '1'}" aria-label="Amount used">
+          <input data-use-amt type="text" inputmode="decimal" placeholder="1" aria-label="Amount used">
           <select data-use-unit aria-label="Unit">${opts.map(o => `<option value="${o.v}" ${o.v === defUnit ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
           <button type="button" class="btn primary small" data-use-go>Mark used</button>
         </div>
-        ${chips.length ? `<div class="use-chips">${chips.map(p => `<button type="button" class="chip" data-use-quick="${p}">${p === 1 ? (u ? `1 (${esc(amt(sz, u))})` : '1') : `${niceQty(p)}${u ? ` (${esc(useLabel(it, p))})` : ''}`}</button>`).join('')}</div>` : ''}
+        ${okChips.length ? `<div class="use-chips">${okChips.map(([l, a, un]) => `<button type="button" class="chip" data-use-quick="${a}" data-use-qunit="${un}">${esc(l)}</button>`).join('')}</div>` : ''}
         ${(it.usage || []).length ? `<details class="use-log"><summary>Recent use (${it.usage.length})</summary><ul>
           ${it.usage.slice(0, 10).map(e => `<li><span>${fmtWhen(e.at)}</span> ${esc(e.by || '?')} used <b>${esc(e.label)}</b>${e.recipe ? ` for ${esc(e.recipe)}` : ''}</li>`).join('')}
         </ul></details>` : ''}
@@ -830,6 +878,18 @@ function itemSheet(it, prefill = null) {
       f('name').addEventListener('change', () => setTimeout(syncSpice, 0));
       const doUse = async (packs, typed) => {
         if (!(packs > 0)) return s.querySelector('[data-use-amt]').focus();
+        const cur = db.get('items', it.id), have = availableQty(cur);
+        if (packs >= have - 1e-9) {
+          const what = isOpenedCopy(cur) ? `the opened ${cur.name}` : `all of your ${cur.name}`;
+          const ok = await confirmSheet(packs > have + 1e-9 ? 'More than you have' : 'Use it all up?',
+            `<p>${esc(typed || useLabel(cur, packs))} is ${packs > have + 1e-9 ? 'more than' : 'all of'} ${esc(what)} (${esc(totalText(cur, have))}). It will be marked as finished.</p><p class="small muted">Meant a smaller amount? Cancel and check the unit next to the number.</p>`,
+            'Yes, it’s finished');
+          if (!ok) return;
+          packs = have;
+        }
+        // remember the unit for next time
+        const un = s.querySelector('[data-use-unit]')?.value;
+        if (un && un !== cur.lastUseUnit && !typed?.startsWith?.('the rest')) db.put('items', { ...cur, lastUseUnit: un });
         const before = db.get('items', it.id);
         const snap = snapshotFamily(it.id);
         const hadOpen = openedCopiesOf(before).length;
@@ -849,7 +909,7 @@ function itemSheet(it, prefill = null) {
         doUse(isNaN(a) ? 0 : toPacks(it, a, un), isNaN(a) ? '' : un === 'each' ? useLabel(it, a) : `${fmtQty(a)} ${un === 'tbsp' ? 'Tbsp' : un}`);
       });
       s.querySelector('[data-use-amt]')?.addEventListener('keydown', e => { if (e.key === 'Enter') s.querySelector('[data-use-go]').click(); });
-      s.querySelectorAll('[data-use-quick]').forEach(b => b.addEventListener('click', () => doUse(+b.dataset.useQuick)));
+      s.querySelectorAll('[data-use-quick]').forEach(b => b.addEventListener('click', () => doUse(toPacks(it, +b.dataset.useQuick, b.dataset.useQunit), b.textContent)));
       const showTotal = () => {
         const q = qtyIn(f('qty').value) || 0, u = normUnit(f('unit').value), sz = parseAmount(f('size').value);
         const one = sz > 0 ? sz : 1;
@@ -2066,14 +2126,14 @@ function bind() {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', dragId);
     row.classList.add('dragging');
-    view.querySelectorAll('.loc-col').forEach(c => c.classList.add('drop-ready'));
+    view.querySelectorAll('.drop-zone').forEach(c => c.classList.add('drop-ready'));
   });
   view.addEventListener('dragend', () => {
     dragId = null;
     view.querySelectorAll('.dragging, .drop-ready, .drop-over').forEach(el => el.classList.remove('dragging', 'drop-ready', 'drop-over'));
   });
   view.addEventListener('dragover', e => {
-    const col = e.target.closest?.('.loc-col');
+    const col = e.target.closest?.('.drop-zone');
     if (!col || !dragId) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
@@ -2081,7 +2141,7 @@ function bind() {
     col.classList.add('drop-over');
   });
   view.addEventListener('drop', e => {
-    const col = e.target.closest?.('.loc-col');
+    const col = e.target.closest?.('.drop-zone');
     if (!col || !dragId) return;
     e.preventDefault();
     const it = db.get('items', dragId);
@@ -2120,6 +2180,15 @@ function askName() {
   render();
   if (!S.name) askName();
   db.setAfterPut(gh.noteLocalChange);
+  // one-time: snacks move to the new snack cabinet, condiments in the fridge to the door
+  if (!localStorage.getItem('pantry.mig.fridgeSplit')) {
+    for (const it of db.list('items')) {
+      if (isOpenedCopy(it) || isLeftover(it)) continue;
+      if ((it.category === 'snacks' || ['Cookies', 'Candy & chocolate'].includes(it.sub)) && (!it.location || it.location === 'pantry')) await db.put('items', { ...it, location: 'snacks' });
+      else if (it.sub === 'Sauces & condiments' && it.location === 'fridge') await db.put('items', { ...it, location: 'door' });
+    }
+    localStorage.setItem('pantry.mig.fridgeSplit', '1');
+  }
   // one-time: oils now live on the stovetop (they used to be kept in the pantry)
   if (!localStorage.getItem('pantry.mig.stoveOils')) {
     for (const it of db.list('items')) if (isOil(it) && !isOpenedCopy(it) && (!it.location || it.location === 'pantry')) await db.put('items', { ...it, location: 'stovetop' });
